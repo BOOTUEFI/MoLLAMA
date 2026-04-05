@@ -1,0 +1,17 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.venv
+venv
+env
+node_modules
+dist
+build
+coverage
+.env
+.DS_Store
+src/frontend/node_modules
+src/frontend/dist
+src/backend/__pycache__
