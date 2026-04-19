@@ -2,7 +2,7 @@ import pyperclip
 from pathlib import Path
 import time
 
-src = Path('src\\frontend\\src')
+src = Path('src\\backend')
 combined_text = []
 
 # A set is faster for lookups. Add any other folders you want to ignore here.

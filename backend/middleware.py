@@ -10,7 +10,7 @@ class OllamaProxyMiddleware:
         if scope["type"] == "http":
             path: str = scope.get("path", "")
             
-            # Catches /api (Ollama) and /v1 (OpenAI/Anthropic)
+            # REMOVED trailing slash from check so /api/chat is caught
             if path.startswith("/api") or path.startswith("/v1"):
                 if "headers" in scope:
                     filtered_headers = []

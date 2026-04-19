@@ -170,3 +170,96 @@ export const useDeleteModel = () => {
     },
   })
 }
+
+// ── Tools hooks ───────────────────────────────────────────────────────────────
+
+import {
+  fetchTools, fetchToolFile, saveToolFile, deleteToolFile, reloadTools,
+  fetchMcpServers, addMcpServer, removeMcpServer, connectMcpServer, disconnectMcpServer,
+  fetchAppSettings, saveAppSettings,
+} from "@/lib/api"
+
+export const useTools = () =>
+  useQuery({ queryKey: ["tools"], queryFn: fetchTools, staleTime: 5000 })
+
+export const useToolFile = (path: string | null) =>
+  useQuery({
+    queryKey: ["toolFile", path],
+    queryFn: () => fetchToolFile(path!),
+    enabled: !!path,
+    staleTime: 0,
+  })
+
+export const useSaveToolFile = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ path, code }: { path: string; code: string }) => saveToolFile(path, code),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tools"] }),
+  })
+}
+
+export const useDeleteToolFile = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (path: string) => deleteToolFile(path),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tools"] }),
+  })
+}
+
+export const useReloadTools = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: reloadTools,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tools"] }),
+  })
+}
+
+// ── MCP hooks ─────────────────────────────────────────────────────────────────
+
+export const useMcpServers = () =>
+  useQuery({ queryKey: ["mcpServers"], queryFn: fetchMcpServers, refetchInterval: 3000 })
+
+export const useAddMcpServer = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: addMcpServer,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["mcpServers"] }),
+  })
+}
+
+export const useRemoveMcpServer = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: removeMcpServer,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["mcpServers"] }),
+  })
+}
+
+export const useConnectMcpServer = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: connectMcpServer,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["mcpServers"] }),
+  })
+}
+
+export const useDisconnectMcpServer = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: disconnectMcpServer,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["mcpServers"] }),
+  })
+}
+
+// ── Settings hooks ────────────────────────────────────────────────────────────
+
+export const useAppSettings = () =>
+  useQuery({ queryKey: ["appSettings"], queryFn: fetchAppSettings, staleTime: 5000 })
+
+export const useSaveAppSettings = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: saveAppSettings,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["appSettings"] }),
+  })
+}

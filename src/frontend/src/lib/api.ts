@@ -339,6 +339,133 @@ export async function* pullModelToInstance(
   }
 }
 
+// ── Tools CRUD ────────────────────────────────────────────────────────────────
+
+export interface ToolFile {
+  path: string
+  type: "simple" | "folder"
+  functions: string[]
+  context?: string
+  context_path?: string | null
+}
+
+export interface ToolsResponse {
+  tools: ToolFile[]
+  schemas: object[]
+}
+
+export const fetchTools = async (): Promise<ToolsResponse> => {
+  const r = await fetch(`${API_BASE_URL}/admin/tools`)
+  if (!r.ok) throw new Error("Failed to fetch tools")
+  return r.json()
+}
+
+export const fetchToolFile = async (path: string): Promise<string> => {
+  const r = await fetch(`${API_BASE_URL}/admin/tools/file?path=${encodeURIComponent(path)}`)
+  if (!r.ok) throw new Error("Failed to read tool file")
+  const data = await r.json()
+  return data.code ?? ""
+}
+
+export const saveToolFile = async (path: string, code: string): Promise<{ ok: boolean; loaded: number }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/tools/file`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, code }),
+  })
+  if (!r.ok) throw new Error("Failed to save tool file")
+  return r.json()
+}
+
+export const deleteToolFile = async (path: string): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/tools/file`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  })
+  if (!r.ok) throw new Error("Failed to delete tool file")
+  return r.json()
+}
+
+export const reloadTools = async (): Promise<{ ok: boolean; loaded: number }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/tools/reload`, { method: "POST" })
+  if (!r.ok) throw new Error("Failed to reload tools")
+  return r.json()
+}
+
+// ── MCP Servers ───────────────────────────────────────────────────────────────
+
+export interface McpServer {
+  name: string
+  transport: "stdio" | "sse"
+  command?: string
+  args?: string[]
+  url?: string
+  env?: Record<string, string>
+  headers?: Record<string, string>
+  autoconnect: boolean
+  connected: boolean
+  tool_count: number
+  tools: object[]
+}
+
+export const fetchMcpServers = async (): Promise<{ servers: McpServer[] }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/mcp/servers`)
+  if (!r.ok) throw new Error("Failed to fetch MCP servers")
+  return r.json()
+}
+
+export const addMcpServer = async (cfg: Record<string, unknown>): Promise<{ ok: boolean; connected: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/mcp/servers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(cfg),
+  })
+  if (!r.ok) throw new Error("Failed to add MCP server")
+  return r.json()
+}
+
+export const removeMcpServer = async (name: string): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/mcp/servers/${encodeURIComponent(name)}`, { method: "DELETE" })
+  if (!r.ok) throw new Error("Failed to remove MCP server")
+  return r.json()
+}
+
+export const connectMcpServer = async (name: string): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/mcp/servers/${encodeURIComponent(name)}/connect`, { method: "POST" })
+  if (!r.ok) throw new Error("Failed to connect MCP server")
+  return r.json()
+}
+
+export const disconnectMcpServer = async (name: string): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/mcp/servers/${encodeURIComponent(name)}/disconnect`, { method: "POST" })
+  if (!r.ok) throw new Error("Failed to disconnect MCP server")
+  return r.json()
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+
+export interface AppSettings {
+  context_compression?: boolean
+  compression_threshold?: number
+}
+
+export const fetchAppSettings = async (): Promise<AppSettings> => {
+  const r = await fetch(`${API_BASE_URL}/admin/settings`)
+  if (!r.ok) throw new Error("Failed to fetch settings")
+  return r.json()
+}
+
+export const saveAppSettings = async (settings: Partial<AppSettings>): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/settings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  })
+  if (!r.ok) throw new Error("Failed to save settings")
+  return r.json()
+}
+
 // ── Proxy Endpoint ────────────────────────────────────────────────────────────
 
 export const sendChatMessage = async function* (

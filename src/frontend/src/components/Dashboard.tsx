@@ -5,11 +5,13 @@ import { Badge } from "@/components/ui/badge"
 import {
   Activity, Settings, MessageSquare, Server, Cpu, RefreshCcw,
   Pause, Play, X, ChevronDown, ChevronUp, Loader2,
-  Shield, Terminal, TrendingUp, AlertCircle, ArrowRight,
+  Shield, Terminal, TrendingUp, AlertCircle, ArrowRight, Wrench, Plug,
 } from "lucide-react"
 import { LiveFeed } from "./LiveFeed"
 import { ChatHub } from "./ChatHub"
 import { InstanceManager } from "./InstanceManager"
+import { ToolsEditor } from "./ToolsEditor"
+import { McpManager } from "./McpManager"
 import { SettingsPanel } from "./SettingsPanel"
 import { ConnectionGuard } from "./ConnectionGuard"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -655,10 +657,27 @@ function DesktopLayout({ selectedModel, onShowSettings, onUpdateOllama, updateBu
 
         <motion.div
           variants={slideIn(20)} initial="hidden" animate="visible"
-          className="min-w-80 flex flex-col gap-1.5"
+          className="min-w-80 flex flex-col gap-1.5 overflow-hidden"
         >
-          <SectionLabel icon={<Server size={10} />} label="Cluster Nodes" right />
-          <InstanceManager />
+          <Tabs defaultValue="nodes" className="flex flex-col flex-1 overflow-hidden gap-1.5">
+            <TabsList className="shrink-0 rounded-xl p-1 bg-secondary/12 border border-border/25">
+              {[
+                { v: "nodes", icon: <Server size={11} />, label: "Nodes" },
+                { v: "tools", icon: <Wrench size={11} />, label: "Tools" },
+                { v: "mcp",   icon: <Plug   size={11} />, label: "MCP"   },
+              ].map(t => (
+                <TabsTrigger key={t.v} value={t.v}
+                  className="flex-1 text-[9px] font-mono uppercase tracking-widest gap-1.5 py-1.5">
+                  {t.icon}{t.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            <div className="flex-1 overflow-hidden">
+              <TabsContent value="nodes" className="h-full m-0"><InstanceManager /></TabsContent>
+              <TabsContent value="tools" className="h-full m-0"><ToolsEditor /></TabsContent>
+              <TabsContent value="mcp"   className="h-full m-0"><McpManager /></TabsContent>
+            </div>
+          </Tabs>
         </motion.div>
       </div>
     </div>
@@ -676,9 +695,11 @@ function MobileLayout({ selectedModel, onShowSettings, onUpdateOllama, updateBus
       <Tabs defaultValue="chat" className="flex-1 flex flex-col overflow-hidden">
         <TabsList className="shrink-0 mx-3 mt-2 rounded-xl p-1 bg-secondary/12 border border-border/25">
           {[
-            { v: "chat", icon: <MessageSquare size={12} />, label: "Chat" },
-            { v: "feed", icon: <Activity size={12} />, label: "Feed" },
-            { v: "nodes", icon: <Server size={12} />, label: "Nodes" },
+            { v: "chat",  icon: <MessageSquare size={12} />, label: "Chat"  },
+            { v: "feed",  icon: <Activity      size={12} />, label: "Feed"  },
+            { v: "nodes", icon: <Server        size={12} />, label: "Nodes" },
+            { v: "tools", icon: <Wrench        size={12} />, label: "Tools" },
+            { v: "mcp",   icon: <Plug          size={12} />, label: "MCP"   },
           ].map(t => (
             <TabsTrigger key={t.v} value={t.v}
               className="flex-1 text-[9px] font-mono uppercase tracking-widest gap-1.5 py-1.5">
@@ -687,9 +708,11 @@ function MobileLayout({ selectedModel, onShowSettings, onUpdateOllama, updateBus
           ))}
         </TabsList>
         <div className="flex-1 overflow-hidden p-2">
-          <TabsContent value="chat" className="h-full m-0"><ChatHub model={selectedModel} /></TabsContent>
-          <TabsContent value="feed" className="h-full m-0"><LiveFeed /></TabsContent>
+          <TabsContent value="chat"  className="h-full m-0"><ChatHub model={selectedModel} /></TabsContent>
+          <TabsContent value="feed"  className="h-full m-0"><LiveFeed /></TabsContent>
           <TabsContent value="nodes" className="h-full m-0"><InstanceManager /></TabsContent>
+          <TabsContent value="tools" className="h-full m-0"><ToolsEditor /></TabsContent>
+          <TabsContent value="mcp"   className="h-full m-0"><McpManager /></TabsContent>
         </div>
       </Tabs>
     </div>

@@ -563,20 +563,33 @@ def promote_main_node() -> Optional[tuple[str, str]]:
     """
     If the designated main is down/banned, unsets is_main on it and promotes
     the next available active instance. Persists to disk.
+
+    Deliberately does NOT require _health to be True for candidates —
+    _health is only populated by the background loop and may be stale
+    at the moment of a manual ban. Instead we only gate on _banned_until
+    so a freshly-banned instance is correctly excluded while all others
+    are eligible.
     """
     now = time.time()
     data = load_data()
 
+    # Find and clear the current (failing) main
     current_main: Optional[str] = None
     for name, inst in data.items():
         if inst.get("is_main"):
+            # Still healthy — nothing to do
             if now >= _banned_until.get(name, 0) and _health.get(name, True):
                 return name, inst["base_url"]
+            # Down/banned — unset it
             current_main = name
             data[name]["is_main"] = False
             save_data(data)
             break
 
+    # Find the next active instance that is not banned (skip the failed main)
+    # Find the next active instance that is not explicitly banned or unhealthy.
+    # _health defaults to True (unknown = assume ok) — only the freshly-banned
+    # node has _health explicitly set to False by the ban endpoint caller.
     data = load_data()
     for name, inst in data.items():
         if name == current_main:
@@ -585,7 +598,7 @@ def promote_main_node() -> Optional[tuple[str, str]]:
             continue
         if now < _banned_until.get(name, 0):
             continue
-        if not _health.get(name, True):
+        if not _health.get(name, True):  # skip only if explicitly False
             continue
         set_main_node(name)
         return name, inst["base_url"]
@@ -665,8 +678,11 @@ async def health_check_loop() -> None:
                     continue
                 if now < _banned_until.get(name, 0):
                     _health[name] = False
+                    
+                    # ADD THIS
                     if inst.get("is_main"):
                         promote_main_node()
+                        
                     continue
                 try:
                     r = await client.get(f"{url.rstrip('/')}/api/tags")
@@ -886,6 +902,7 @@ async def select_best_model_for_prompt(
     """
     main = get_main_node()
     if not main:
+        # Try promoting before giving up
         main = promote_main_node()
     if not main:
         return None, None, None

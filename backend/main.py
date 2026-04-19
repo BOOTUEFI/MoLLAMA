@@ -5,10 +5,9 @@ import asyncio
 from typing import Any
 import os
 import json
-from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -17,27 +16,8 @@ from fastapi.staticfiles import StaticFiles
 import core
 import events as _ev
 from middleware import OllamaProxyMiddleware
-from ws_manager import ws_manager
-from mcp_manager import mcp_manager
-from tools import registry
 
 import httpx
-
-SETTINGS_FILE = Path("/data/settings.json")
-
-
-def _load_settings() -> dict:
-    if SETTINGS_FILE.exists():
-        try:
-            return json.loads(SETTINGS_FILE.read_text())
-        except Exception:
-            pass
-    return {}
-
-
-def _save_settings(data: dict) -> None:
-    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(json.dumps(data, indent=2))
 
 
 def _spawn_background_task(app: FastAPI, coro):
@@ -59,46 +39,11 @@ def _spawn_background_task(app: FastAPI, coro):
     return task
 
 
-async def _ws_broadcast_loop() -> None:
-    """Push live state to all connected WebSocket clients every 300 ms."""
-    prev_event_ts = 0.0
-    while True:
-        try:
-            if ws_manager.count > 0:
-                data = core.load_data()
-                stats_payload = {
-                    "total_requests": _ev.total_requests,
-                    "processing": _ev._processing,
-                    "health": {k: bool(v) for k, v in getattr(core, "_health", {}).items()},
-                    "banned_until": getattr(core, "_banned_until", {}),
-                    "managed_count": sum(1 for i in data.values() if i.get("managed")),
-                    "maintenance": core.get_maintenance_state(),
-                }
-
-                feed = list(_ev.feed_log)
-                streams = sorted(_ev.stream_log.values(), key=lambda x: x["ts"], reverse=True)[:50]
-
-                await ws_manager.broadcast({
-                    "type": "state",
-                    "stats": stats_payload,
-                    "instances": data,
-                    "events": {"events": feed, "total": len(feed)},
-                    "streams": {"streams": streams},
-                    "processing": {"processing": _ev._processing},
-                })
-        except Exception:
-            pass
-        await asyncio.sleep(0.3)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state._autostart_task = asyncio.create_task(core._autostart_managed())
     app.state._health_task = asyncio.create_task(core.health_check_loop())
-    app.state._ws_broadcast_task = asyncio.create_task(_ws_broadcast_loop())
     app.state._bg_tasks = set()
-    # Autoconnect MCP servers
-    asyncio.create_task(mcp_manager.autoconnect())
     try:
         yield
     finally:
@@ -113,7 +58,7 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
-        for tname in ("_autostart_task", "_health_task", "_ws_broadcast_task"):
+        for tname in ("_autostart_task", "_health_task"):
             t = getattr(app.state, tname, None)
             if t:
                 t.cancel()
@@ -506,130 +451,6 @@ async def get_all_proxied_tags():
     })
 
     return {"models": all_models}
-
-# ── WebSocket ─────────────────────────────────────────────────────────────────
-
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    await ws_manager.connect(ws)
-    try:
-        while True:
-            # Keep alive — client can send pings; we just discard them
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        await ws_manager.disconnect(ws)
-
-
-# ── Tools CRUD ────────────────────────────────────────────────────────────────
-
-@app.get("/admin/tools")
-def list_tools() -> dict:
-    return {"tools": registry.list_tool_files(), "schemas": registry.schemas}
-
-
-@app.get("/admin/tools/file")
-def read_tool(path: str) -> dict:
-    try:
-        return {"code": registry.read_tool_file(path)}
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-
-
-@app.post("/admin/tools/file")
-def write_tool(body: dict) -> dict:
-    path = body.get("path")
-    code = body.get("code", "")
-    if not path:
-        raise HTTPException(status_code=400, detail="missing path")
-    try:
-        registry.write_tool_file(path, code)
-        registry.hot_reload()
-        return {"ok": True, "loaded": len(registry.tools)}
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-
-
-@app.delete("/admin/tools/file")
-def delete_tool(body: dict) -> dict:
-    path = body.get("path")
-    if not path:
-        raise HTTPException(status_code=400, detail="missing path")
-    try:
-        registry.delete_tool_file(path)
-        registry.hot_reload()
-        return {"ok": True}
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-
-
-@app.post("/admin/tools/reload")
-def reload_tools() -> dict:
-    count = registry.hot_reload()
-    return {"ok": True, "loaded": count}
-
-
-# ── MCP Servers ───────────────────────────────────────────────────────────────
-
-@app.get("/admin/mcp/servers")
-def list_mcp_servers() -> dict:
-    return {"servers": mcp_manager.list_servers()}
-
-
-@app.post("/admin/mcp/servers")
-async def add_mcp_server(body: dict) -> dict:
-    name = body.get("name")
-    if not name:
-        raise HTTPException(status_code=400, detail="missing name")
-    mcp_manager.add_server(name, {k: v for k, v in body.items() if k != "name"})
-    if body.get("autoconnect", True):
-        ok = await mcp_manager.connect_server(name)
-        return {"ok": True, "connected": ok}
-    return {"ok": True, "connected": False}
-
-
-@app.delete("/admin/mcp/servers/{name}")
-async def remove_mcp_server(name: str) -> dict:
-    mcp_manager.remove_server(name)
-    return {"ok": True}
-
-
-@app.post("/admin/mcp/servers/{name}/connect")
-async def connect_mcp_server(name: str) -> dict:
-    ok = await mcp_manager.connect_server(name)
-    return {"ok": ok}
-
-
-@app.post("/admin/mcp/servers/{name}/disconnect")
-async def disconnect_mcp_server(name: str) -> dict:
-    await mcp_manager.disconnect_server(name)
-    return {"ok": True}
-
-
-@app.get("/admin/mcp/tools")
-def list_mcp_tools() -> dict:
-    return {"tools": mcp_manager.get_all_tool_schemas()}
-
-
-# ── Settings ──────────────────────────────────────────────────────────────────
-
-@app.get("/admin/settings")
-def get_settings() -> dict:
-    return _load_settings()
-
-
-@app.post("/admin/settings")
-def save_settings(body: dict) -> dict:
-    current = _load_settings()
-    current.update(body)
-    _save_settings(current)
-    return {"ok": True, "settings": current}
-
-
-# ── Middleware ────────────────────────────────────────────────────────────────
 
 app.add_middleware(OllamaProxyMiddleware)
 app.add_middleware(
