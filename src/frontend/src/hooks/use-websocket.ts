@@ -56,7 +56,7 @@ export function useWebSocketProvider(): WsStatus {
         if (msg.type !== "state") return
 
         if (msg.stats) {
-          queryClient.setQueryData(["system-stats"], msg.stats)
+          queryClient.setQueryData(["system-stats"], (old: any) => ({ ...(old ?? {}), ...msg.stats }))
         }
         if (msg.instances) {
           queryClient.setQueryData(["instances"], msg.instances)

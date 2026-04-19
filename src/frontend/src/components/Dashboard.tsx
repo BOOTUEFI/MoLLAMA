@@ -10,7 +10,7 @@ import {
 import { LiveFeed } from "./LiveFeed"
 import { ChatHub } from "./ChatHub"
 import { InstanceManager } from "./InstanceManager"
-import { ToolsEditor } from "./ToolsEditor"
+import { ToolFileList, ToolEditorPane } from "./ToolsEditor"
 import { McpManager } from "./McpManager"
 import { SettingsPanel } from "./SettingsPanel"
 import { ConnectionGuard } from "./ConnectionGuard"
@@ -629,9 +629,10 @@ const slideIn = (x: number) => ({
   visible: { opacity: 1, x: 0, transition: { duration: 0.32, ease: "easeOut" } },
 })
 
-function DesktopLayout({ selectedModel, onShowSettings, onUpdateOllama, updateBusy }: {
+function DesktopLayout({ selectedModel, onShowSettings, onUpdateOllama, updateBusy, toolPath, setToolPath }: {
   selectedModel: string; onShowSettings: () => void
   onUpdateOllama: () => void; updateBusy: boolean
+  toolPath: string | null; setToolPath: (p: string | null) => void
 }) {
   return (
     <div className="flex flex-col h-screen">
@@ -652,7 +653,20 @@ function DesktopLayout({ selectedModel, onShowSettings, onUpdateOllama, updateBu
           transition={{ duration: 0.3, delay: 0.07 }}
           className="flex-1 min-w-0"
         >
-          <ChatHub model={selectedModel} />
+          <AnimatePresence mode="wait">
+            {toolPath ? (
+              <ToolEditorPane key={toolPath} selectedPath={toolPath} onClose={() => setToolPath(null)} />
+            ) : (
+              <motion.div
+                key="chat"
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                transition={{ duration: 0.18 }}
+                className="h-full"
+              >
+                <ChatHub model={selectedModel} />
+              </motion.div>
+            )}
+          </AnimatePresence>
         </motion.div>
 
         <motion.div
@@ -674,7 +688,9 @@ function DesktopLayout({ selectedModel, onShowSettings, onUpdateOllama, updateBu
             </TabsList>
             <div className="flex-1 overflow-hidden">
               <TabsContent value="nodes" className="h-full m-0"><InstanceManager /></TabsContent>
-              <TabsContent value="tools" className="h-full m-0"><ToolsEditor /></TabsContent>
+              <TabsContent value="tools" className="h-full m-0">
+                <ToolFileList selectedPath={toolPath} onSelect={setToolPath} />
+              </TabsContent>
               <TabsContent value="mcp"   className="h-full m-0"><McpManager /></TabsContent>
             </div>
           </Tabs>
@@ -684,9 +700,10 @@ function DesktopLayout({ selectedModel, onShowSettings, onUpdateOllama, updateBu
   )
 }
 
-function MobileLayout({ selectedModel, onShowSettings, onUpdateOllama, updateBusy }: {
+function MobileLayout({ selectedModel, onShowSettings, onUpdateOllama, updateBusy, toolPath, setToolPath }: {
   selectedModel: string; onShowSettings: () => void
   onUpdateOllama: () => void; updateBusy: boolean
+  toolPath: string | null; setToolPath: (p: string | null) => void
 }) {
   return (
     <div className="flex flex-col h-screen">
@@ -711,7 +728,13 @@ function MobileLayout({ selectedModel, onShowSettings, onUpdateOllama, updateBus
           <TabsContent value="chat"  className="h-full m-0"><ChatHub model={selectedModel} /></TabsContent>
           <TabsContent value="feed"  className="h-full m-0"><LiveFeed /></TabsContent>
           <TabsContent value="nodes" className="h-full m-0"><InstanceManager /></TabsContent>
-          <TabsContent value="tools" className="h-full m-0"><ToolsEditor /></TabsContent>
+          <TabsContent value="tools" className="h-full m-0">
+            {toolPath ? (
+              <ToolEditorPane selectedPath={toolPath} onClose={() => setToolPath(null)} />
+            ) : (
+              <ToolFileList selectedPath={null} onSelect={setToolPath} />
+            )}
+          </TabsContent>
           <TabsContent value="mcp"   className="h-full m-0"><McpManager /></TabsContent>
         </div>
       </Tabs>
@@ -726,6 +749,7 @@ export function Dashboard() {
   const [showSettings, setShowSettings] = useState(false)
   const { data: models } = useModels()
   const [selectedModel, setSelectedModel] = useState("")
+  const [toolPath, setToolPath] = useState<string | null>(null)
   const maintenance = useOllamaMaintenance()
 
   useEffect(() => {
@@ -737,6 +761,8 @@ export function Dashboard() {
     onShowSettings: () => setShowSettings(true),
     onUpdateOllama: maintenance.startUpdate,
     updateBusy: maintenance.running,
+    toolPath,
+    setToolPath,
   }
 
   return (
