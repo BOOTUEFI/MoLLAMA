@@ -156,3 +156,27 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* ── Global scrollbar styling ─────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: oklch(0.28 0.04 280 / 0.55);
+  border-radius: 999px;
+  transition: background 0.2s;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.42 0.07 280 / 0.75);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(0.28 0.04 280 / 0.5) transparent;
+}

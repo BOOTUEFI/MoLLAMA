@@ -1,11 +1,13 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react"
-import { motion, AnimatePresence } from "framer-motion"
+import { Panel, Group, Separator, usePanelRef } from "react-resizable-panels"
+import { motion, LayoutGroup, AnimatePresence } from "framer-motion"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import {
   Activity, Settings, MessageSquare, Server, Cpu, RefreshCcw,
   Pause, Play, X, ChevronDown, ChevronUp, Loader2,
-  Shield, Terminal, TrendingUp, AlertCircle, ArrowRight, Wrench, Plug,
+  Shield, Terminal, TrendingUp, AlertCircle, Wrench, Plug,
+  PanelLeft, PanelRight, GripVertical,
 } from "lucide-react"
 import { LiveFeed } from "./LiveFeed"
 import { ChatHub } from "./ChatHub"
@@ -512,9 +514,12 @@ function StatPill({
 
 function TopBar({
   selectedModel, onShowSettings, onUpdateOllama, updateBusy,
+  onToggleLeft, onToggleRight, leftCollapsed, rightCollapsed,
 }: {
   selectedModel: string; onShowSettings: () => void
   onUpdateOllama: () => void; updateBusy: boolean
+  onToggleLeft?: () => void; onToggleRight?: () => void
+  leftCollapsed?: boolean; rightCollapsed?: boolean
 }) {
   const { isOffline, isApiDown } = useConnectivity()
   const isDisconnected = isOffline || isApiDown
@@ -575,7 +580,7 @@ function TopBar({
       </div>
 
       {/* Right — controls */}
-      <div className="flex items-center gap-1.5 relative">
+      <div className="flex items-center gap-1 relative">
         {selectedModel && (
           <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border/20 bg-secondary/12 max-w-44">
             <Cpu size={10} className="text-muted-foreground shrink-0" />
@@ -600,6 +605,24 @@ function TopBar({
             </button>
         )}
 
+        {onToggleLeft !== undefined && (
+          <button
+            onClick={onToggleLeft}
+            title={leftCollapsed ? "Show left panel" : "Hide left panel"}
+            className={`p-1.5 rounded-lg transition-colors ${leftCollapsed ? "text-primary/60 hover:text-primary bg-primary/8" : "text-muted-foreground/50 hover:text-foreground hover:bg-secondary/50"}`}
+          >
+            <PanelLeft size={13} />
+          </button>
+        )}
+        {onToggleRight !== undefined && (
+          <button
+            onClick={onToggleRight}
+            title={rightCollapsed ? "Show right panel" : "Hide right panel"}
+            className={`p-1.5 rounded-lg transition-colors ${rightCollapsed ? "text-primary/60 hover:text-primary bg-primary/8" : "text-muted-foreground/50 hover:text-foreground hover:bg-secondary/50"}`}
+          >
+            <PanelRight size={13} />
+          </button>
+        )}
         <motion.button
           whileHover={{ scale: 1.1, rotate: 45 }}
           whileTap={{ scale: 0.9 }}
@@ -615,94 +638,223 @@ function TopBar({
 
 // ─── Layouts ─────────────────────────────────────────────────────────────────
 
-function SectionLabel({ icon, label, right }: { icon: React.ReactNode; label: string; right?: boolean }) {
+function ResizeHandle() {
   return (
-    <div className={`flex flex-1 justify-end items-center gap-1.5 px-1 pb-0.5 opacity-35 ${right ? "flex-row-reverse" : ""}`}>
-      <span className="text-[8.5px] font-mono font-black uppercase tracking-[0.25em]">{label}</span>
-      {icon}
-    </div>
+    <Separator className="group relative flex items-center justify-center w-[6px] mx-0.5">
+      <div className="absolute inset-y-0 left-[2.5px] w-px bg-border/20 group-hover:bg-primary/40 group-data-[resize-handle-active]:bg-primary/70 transition-colors duration-150" />
+      <div className="absolute z-10 h-8 w-3.5 rounded-full bg-background/0 group-hover:bg-background flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-150 border border-transparent group-hover:border-border/30">
+        <GripVertical size={8} className="text-muted-foreground/40" />
+      </div>
+    </Separator>
   )
 }
 
-const slideIn = (x: number) => ({
-  hidden: { opacity: 0, x },
-  visible: { opacity: 1, x: 0, transition: { duration: 0.32, ease: "easeOut" } },
-})
 
-function DesktopLayout({ selectedModel, onShowSettings, onUpdateOllama, updateBusy, toolPath, setToolPath }: {
-  selectedModel: string; onShowSettings: () => void
-  onUpdateOllama: () => void; updateBusy: boolean
+function DesktopLayout({ selectedModel, onModelChange, models, onShowSettings, onUpdateOllama, updateBusy, toolPath, setToolPath }: {
+  selectedModel: string; onModelChange: (m: string) => void; models: string[]
+  onShowSettings: () => void; onUpdateOllama: () => void; updateBusy: boolean
   toolPath: string | null; setToolPath: (p: string | null) => void
 }) {
-  return (
-    <div className="flex flex-col h-screen">
-      <TopBar selectedModel={selectedModel} onShowSettings={onShowSettings}
-        onUpdateOllama={onUpdateOllama} updateBusy={updateBusy} />
-      <div className="flex flex-1 gap-2 p-3 overflow-hidden">
+  const leftRef = usePanelRef()
+  const rightRef = usePanelRef()
+  const [leftCollapsed, setLeftCollapsed] = useState(() => localStorage.getItem("mollama_left_collapsed") === "true")
+  const [rightCollapsed, setRightCollapsed] = useState(() => localStorage.getItem("mollama_right_collapsed") === "true")
+  const [rightTab, setRightTab] = useState(() => localStorage.getItem("mollama_right_tab") || "nodes")
 
-        <motion.div
-          variants={slideIn(-20)} initial="hidden" animate="visible"
-          className="min-w-80 flex flex-col gap-1.5"
-        >
-          <SectionLabel icon={<Activity size={10} />} label="System Feed" />
-          <LiveFeed />
-        </motion.div>
+  useEffect(() => { localStorage.setItem("mollama_left_collapsed", String(leftCollapsed)) }, [leftCollapsed])
+  useEffect(() => { localStorage.setItem("mollama_right_collapsed", String(rightCollapsed)) }, [rightCollapsed])
+  useEffect(() => { localStorage.setItem("mollama_right_tab", rightTab) }, [rightTab])
 
-        <motion.div
-          initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3, delay: 0.07 }}
-          className="flex-1 min-w-0"
-        >
-          <AnimatePresence mode="wait">
-            {toolPath ? (
-              <ToolEditorPane key={toolPath} selectedPath={toolPath} onClose={() => setToolPath(null)} />
-            ) : (
-              <motion.div
-                key="chat"
-                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                transition={{ duration: 0.18 }}
-                className="h-full"
-              >
-                <ChatHub model={selectedModel} />
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </motion.div>
+  // Restore persisted panel collapse on first render
+  useEffect(() => {
+    if (leftCollapsed) leftRef.current?.collapse()
+    if (rightCollapsed) rightRef.current?.collapse()
+  }, [])
 
-        <motion.div
-          variants={slideIn(20)} initial="hidden" animate="visible"
-          className="min-w-80 flex flex-col gap-1.5 overflow-hidden"
-        >
-          <Tabs defaultValue="nodes" className="flex flex-col flex-1 overflow-hidden gap-1.5">
-            <TabsList className="shrink-0 rounded-xl p-1 bg-secondary/12 border border-border/25">
-              {[
-                { v: "nodes", icon: <Server size={11} />, label: "Nodes" },
-                { v: "tools", icon: <Wrench size={11} />, label: "Tools" },
-                { v: "mcp",   icon: <Plug   size={11} />, label: "MCP"   },
-              ].map(t => (
-                <TabsTrigger key={t.v} value={t.v}
-                  className="flex-1 text-[9px] font-mono uppercase tracking-widest gap-1.5 py-1.5">
-                  {t.icon}{t.label}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-            <div className="flex-1 overflow-hidden">
-              <TabsContent value="nodes" className="h-full m-0"><InstanceManager /></TabsContent>
-              <TabsContent value="tools" className="h-full m-0">
-                <ToolFileList selectedPath={toolPath} onSelect={setToolPath} />
-              </TabsContent>
-              <TabsContent value="mcp"   className="h-full m-0"><McpManager /></TabsContent>
-            </div>
-          </Tabs>
-        </motion.div>
-      </div>
-    </div>
-  )
+  useEffect(() => {
+    if (toolPath && rightTab === "tools") {
+      setRightTab("nodes")
+    }
+  }, [toolPath, rightTab])
+
+  const toggleLeft = useCallback(() => {
+    if (leftCollapsed) leftRef.current?.expand()
+    else leftRef.current?.collapse()
+  }, [leftCollapsed])
+
+  const toggleRight = useCallback(() => {
+    if (rightCollapsed) rightRef.current?.expand()
+    else rightRef.current?.collapse()
+  }, [rightCollapsed])
+
+  return (
+    <div className="flex flex-col h-screen">
+      <TopBar
+        selectedModel={selectedModel} onShowSettings={onShowSettings}
+        onUpdateOllama={onUpdateOllama} updateBusy={updateBusy}
+        onToggleLeft={toggleLeft} onToggleRight={toggleRight}
+        leftCollapsed={leftCollapsed} rightCollapsed={rightCollapsed}
+      />
+      <Group orientation="horizontal" className="flex-1 overflow-hidden px-2 pb-2 pt-1.5 gap-0">
+
+        {/* Left panel — LiveFeed or File Explorer */}
+        <Panel
+          panelRef={leftRef}
+          id="left"
+          defaultSize="22%"
+          minSize="14%"
+          collapsible
+          collapsedSize="0%"
+          onResize={(size) => setLeftCollapsed(size.asPercentage === 0)}
+          className="overflow-hidden"
+        >
+          <div className="h-full overflow-hidden">
+            <AnimatePresence mode="wait">
+              {toolPath ? (
+                <motion.div key="explorer" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="h-full">
+                  <ToolFileList selectedPath={toolPath} onSelect={setToolPath} />
+                </motion.div>
+              ) : (
+                <motion.div key="feed" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="h-full">
+                  <LiveFeed />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </Panel>
+
+        <ResizeHandle />
+
+        {/* Center panel — Chat or Editor */}
+        <Panel id="center" minSize="28%" className="overflow-hidden">
+          <div className="h-full overflow-hidden">
+            <AnimatePresence mode="wait">
+              {toolPath ? (
+                <motion.div key={`editor-${toolPath}`} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="h-full">
+                  <ToolEditorPane selectedPath={toolPath} onClose={() => setToolPath(null)} />
+                </motion.div>
+              ) : (
+                <motion.div key="chat" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="h-full">
+                  <ChatHub model={selectedModel} models={models} onModelChange={onModelChange} />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </Panel>
+
+        <ResizeHandle />
+
+        {/* Right panel — Nodes / Tools / MCP */}
+        <Panel
+          panelRef={rightRef}
+          id="right"
+          defaultSize="22%"
+          minSize="14%"
+          collapsible
+          collapsedSize="0%"
+          onResize={(size) => setRightCollapsed(size.asPercentage === 0)}
+          className="overflow-hidden"
+        >
+          <div className="h-full overflow-hidden">
+            <LayoutGroup id="right-tabs">
+                <Tabs value={rightTab} onValueChange={setRightTab} className="flex h-full flex-col gap-1.5">
+                    <TabsList className="shrink-0 p-0 bg-transparent">
+                    <motion.div
+                        layout
+                        className="shrink-0 rounded-xl p-1.5 bg-secondary/12 border border-border/25 flex relative w-full"
+                    >
+                        <AnimatePresence initial={false} mode="popLayout">
+                        {[
+                            { v: "nodes", icon: <Server size={11} />, label: "Nodes" },
+                            { v: "tools", icon: <Wrench size={11} />, label: "Tools" },
+                            { v: "mcp", icon: <Plug size={11} />, label: "MCP" },
+                        ]
+                            .filter((t) => !(t.v === "tools" && toolPath))
+                            .map((t) => {
+                            const active = rightTab === t.v;
+
+                            return (
+                                <motion.div
+                                key={t.v}
+                                layout
+                                initial={{ opacity: 0, width: 0, scale: 0.96 }}
+                                animate={{ opacity: 1, width: "auto", scale: 1 }}
+                                exit={{ opacity: 0, width: 0, scale: 0.96 }}
+                                transition={{
+                                    layout: { type: "spring", stiffness: 500, damping: 36 },
+                                    opacity: { duration: 0.18, ease: "easeOut" },
+                                    width: { type: "spring", stiffness: 500, damping: 36 },
+                                    scale: { duration: 0.18, ease: "easeOut" },
+                                }}
+                                className="relative flex-1 min-w-0"
+                                >
+                                <TabsTrigger value={t.v} asChild>
+                                    <motion.button
+                                    type="button"
+                                    layout
+                                    whileTap={{ scale: 0.98 }}
+                                    transition={{
+                                        layout: { type: "spring", stiffness: 500, damping: 36 },
+                                    }}
+                                    className={[
+                                        "relative w-full whitespace-nowrap rounded-lg px-3 py-1.5",
+                                        "flex items-center justify-center gap-1.5 text-[9px] font-mono font-medium uppercase tracking-widest",
+                                        "transition-colors",
+                                        active ? "text-foreground" : "text-muted-foreground/40 hover:text-muted-foreground/70",
+                                    ].join(" ")}
+                                    >
+                                    {active && (
+                                        <motion.span
+                                        layoutId="right-tab-active-pill"
+                                        className="absolute inset-0 rounded-lg bg-background/60 shadow-sm"
+                                        transition={{
+                                            type: "spring",
+                                            stiffness: 500,
+                                            damping: 36,
+                                        }}
+                                        />
+                                    )}
+
+                                    <span className="relative z-10 flex items-center justify-center gap-1.5 min-w-0">
+                                        <span className="shrink-0">{t.icon}</span>
+                                        <span className="shrink-0 whitespace-nowrap">{t.label}</span>
+                                    </span>
+                                    </motion.button>
+                                </TabsTrigger>
+                                </motion.div>
+                            );
+                            })}
+                        </AnimatePresence>
+                    </motion.div>
+                    </TabsList>
+
+                    <div className="flex-1 min-h-0 overflow-hidden">
+                    <TabsContent value="nodes" className="h-full m-0">
+                        <InstanceManager />
+                    </TabsContent>
+
+                    <TabsContent value="tools" className="h-full m-0">
+                        <ToolFileList selectedPath={toolPath} onSelect={setToolPath} />
+                    </TabsContent>
+
+                    <TabsContent value="mcp" className="h-full m-0">
+                        <McpManager />
+                    </TabsContent>
+                    </div>
+                </Tabs>
+            </LayoutGroup>
+          </div>
+        </Panel>
+      </Group>
+    </div>
+  )
 }
 
-function MobileLayout({ selectedModel, onShowSettings, onUpdateOllama, updateBusy, toolPath, setToolPath }: {
-  selectedModel: string; onShowSettings: () => void
-  onUpdateOllama: () => void; updateBusy: boolean
+
+
+function MobileLayout({ selectedModel, onModelChange, models, onShowSettings, onUpdateOllama, updateBusy, toolPath, setToolPath }: {
+  selectedModel: string; onModelChange: (m: string) => void; models: string[]
+  onShowSettings: () => void; onUpdateOllama: () => void; updateBusy: boolean
   toolPath: string | null; setToolPath: (p: string | null) => void
 }) {
   return (
@@ -725,7 +877,7 @@ function MobileLayout({ selectedModel, onShowSettings, onUpdateOllama, updateBus
           ))}
         </TabsList>
         <div className="flex-1 overflow-hidden p-2">
-          <TabsContent value="chat"  className="h-full m-0"><ChatHub model={selectedModel} /></TabsContent>
+          <TabsContent value="chat"  className="h-full m-0"><ChatHub model={selectedModel} models={models} onModelChange={onModelChange} /></TabsContent>
           <TabsContent value="feed"  className="h-full m-0"><LiveFeed /></TabsContent>
           <TabsContent value="nodes" className="h-full m-0"><InstanceManager /></TabsContent>
           <TabsContent value="tools" className="h-full m-0">
@@ -748,7 +900,7 @@ export function Dashboard() {
   const isMobile = useIsMobile()
   const [showSettings, setShowSettings] = useState(false)
   const { data: models } = useModels()
-  const [selectedModel, setSelectedModel] = useState("")
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem("mollama_model") || "")
   const [toolPath, setToolPath] = useState<string | null>(null)
   const maintenance = useOllamaMaintenance()
 
@@ -756,8 +908,14 @@ export function Dashboard() {
     if (models?.length && !selectedModel) setSelectedModel(models[0])
   }, [models, selectedModel])
 
+  useEffect(() => {
+    if (selectedModel) localStorage.setItem("mollama_model", selectedModel)
+  }, [selectedModel])
+
   const props = {
     selectedModel,
+    onModelChange: setSelectedModel,
+    models: models ?? [],
     onShowSettings: () => setShowSettings(true),
     onUpdateOllama: maintenance.startUpdate,
     updateBusy: maintenance.running,

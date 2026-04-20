@@ -2,13 +2,14 @@
 import signal
 import time
 import asyncio
+import uuid
 from typing import Any
 import os
 import json
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -59,12 +60,52 @@ def _spawn_background_task(app: FastAPI, coro):
     return task
 
 
+# ── WS broadcast caches ────────────────────────────────────────────────────────
+_ws_cache_models: dict = {"data": None, "ts": 0.0, "refreshing": False}
+_ws_cache_mcp: dict = {"data": None, "ts": 0.0}
+_ws_cache_tools: dict = {"data": None, "ts": 0.0}
+_ws_cache_settings: dict = {"data": None, "ts": 0.0}
+
+
+async def _refresh_models_cache(data: dict) -> None:
+    """Fetch models from all active Ollama instances into the WS cache."""
+    try:
+        models: set = set()
+        has_main = any(inst.get("is_main") for inst in data.values())
+        async with httpx.AsyncClient(timeout=3) as client:
+            for inst in data.values():
+                url = inst.get("base_url")
+                if not url:
+                    continue
+                try:
+                    r = await client.get(f"{url}/api/tags")
+                    if r.status_code == 200:
+                        payload = r.json()
+                        items = payload.get("models", []) if isinstance(payload, dict) else payload
+                        for item in items:
+                            if isinstance(item, str):
+                                models.add(item)
+                            elif isinstance(item, dict) and "name" in item:
+                                models.add(item["name"])
+                except Exception:
+                    pass
+        result = sorted(models)
+        if has_main:
+            result = ["mollama"] + result
+        _ws_cache_models["data"] = result
+    except Exception:
+        pass
+    finally:
+        _ws_cache_models["ts"] = time.time()
+        _ws_cache_models["refreshing"] = False
+
+
 async def _ws_broadcast_loop() -> None:
     """Push live state to all connected WebSocket clients every 300 ms."""
-    prev_event_ts = 0.0
     while True:
         try:
             if ws_manager.count > 0:
+                now = time.time()
                 data = core.load_data()
                 stats_payload = {
                     "total_requests": _ev.total_requests,
@@ -78,6 +119,36 @@ async def _ws_broadcast_loop() -> None:
                 feed = list(_ev.feed_log)
                 streams = sorted(_ev.stream_log.values(), key=lambda x: x["ts"], reverse=True)[:50]
 
+                # Refresh slow caches in background
+                if now - _ws_cache_models["ts"] > 10 and not _ws_cache_models["refreshing"]:
+                    _ws_cache_models["refreshing"] = True
+                    asyncio.create_task(_refresh_models_cache(data))
+
+                # Refresh fast caches inline (cheap operations)
+                if now - _ws_cache_mcp["ts"] > 2:
+                    try:
+                        _ws_cache_mcp["data"] = {"servers": mcp_manager.list_servers()}
+                    except Exception:
+                        pass
+                    _ws_cache_mcp["ts"] = now
+
+                if now - _ws_cache_tools["ts"] > 5:
+                    try:
+                        _ws_cache_tools["data"] = {
+                            "tools": registry.list_tool_files(),
+                            "schemas": registry.schemas,
+                        }
+                    except Exception:
+                        pass
+                    _ws_cache_tools["ts"] = now
+
+                if now - _ws_cache_settings["ts"] > 5:
+                    try:
+                        _ws_cache_settings["data"] = _load_settings()
+                    except Exception:
+                        pass
+                    _ws_cache_settings["ts"] = now
+
                 await ws_manager.broadcast({
                     "type": "state",
                     "stats": stats_payload,
@@ -85,6 +156,10 @@ async def _ws_broadcast_loop() -> None:
                     "events": {"events": feed, "total": len(feed)},
                     "streams": {"streams": streams},
                     "processing": {"processing": _ev._processing},
+                    **({"models": _ws_cache_models["data"]} if _ws_cache_models["data"] is not None else {}),
+                    **({"mcpServers": _ws_cache_mcp["data"]} if _ws_cache_mcp["data"] is not None else {}),
+                    **({"tools": _ws_cache_tools["data"]} if _ws_cache_tools["data"] is not None else {}),
+                    **({"appSettings": _ws_cache_settings["data"]} if _ws_cache_settings["data"] is not None else {}),
                 })
         except Exception:
             pass
@@ -329,6 +404,41 @@ async def list_models() -> dict:
     return {"models": result}
 
 
+@app.get("/admin/models/context-length")
+async def get_model_context_length(model: str = "") -> dict:
+    """Return the context window size for a given model from the first active Ollama instance."""
+    if not model:
+        return {"context_length": 4096}
+    active = core.get_active_instances()
+    if not active:
+        return {"context_length": 4096}
+    _, url = active[0]
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.post(f"{url.rstrip('/')}/api/show", json={"name": model})
+            if r.status_code == 200:
+                data = r.json()
+                # model_info contains arch-specific keys like "llama.context_length"
+                for val in (data.get("model_info") or {}).values():
+                    if isinstance(val, int) and val > 512:
+                        # Heuristic: context_length is a large int
+                        pass
+                for key, val in (data.get("model_info") or {}).items():
+                    if "context_length" in key.lower() and isinstance(val, int):
+                        return {"context_length": val}
+                # Fall back to parameters field
+                for line in (data.get("parameters") or "").split("\n"):
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[0] == "num_ctx":
+                        try:
+                            return {"context_length": int(parts[1])}
+                        except ValueError:
+                            pass
+    except Exception:
+        pass
+    return {"context_length": 4096}
+
+
 @app.get("/admin/instances/{full_name}/models")
 async def instance_models(full_name: str) -> dict:
     models = await core.fetch_instance_models(full_name)
@@ -570,6 +680,241 @@ def delete_tool(body: dict) -> dict:
 def reload_tools() -> dict:
     count = registry.hot_reload()
     return {"ok": True, "loaded": count}
+
+
+@app.post("/admin/tools/run")
+async def run_tool(body: dict) -> dict:
+    tool_name = body.get("tool")
+    args = body.get("args", {})
+    if not tool_name:
+        raise HTTPException(status_code=400, detail="missing tool")
+    try:
+        result = await registry.aexecute(tool_name, args)
+        return {"ok": True, "result": str(result)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/admin/tools/generate")
+async def generate_tool(body: dict) -> dict:
+    import re
+    description = body.get("description", "").strip()
+    model = body.get("model", "")
+    if not description:
+        raise HTTPException(status_code=400, detail="missing description")
+
+    data = core.load_data()
+    active = [(n, i) for n, i in data.items() if i.get("active") and i.get("base_url")]
+    if not active:
+        raise HTTPException(status_code=503, detail="no active Ollama instances")
+
+    _, inst = active[0]
+    url = inst["base_url"].rstrip("/")
+
+    if not model:
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.get(f"{url}/api/tags")
+                tags = r.json().get("models", [])
+                model = tags[0]["name"] if tags else "llama3.2"
+        except Exception:
+            model = "llama3.2"
+
+    system_prompt = (
+        "You are a Python tool generator for an AI assistant system.\n"
+        "Generate a single Python file with one or more utility functions.\n\n"
+        "Rules:\n"
+        "- Each function needs a clear one-line docstring (shown to the LLM)\n"
+        "- Use type annotations for all parameters and return values\n"
+        "- Return str or JSON-serializable data\n"
+        "- Only use Python stdlib unless a dep is truly essential\n"
+        "- No class definitions — only module-level functions\n"
+        "- Output ONLY raw Python code, no markdown fences"
+    )
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(f"{url}/api/chat", json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Create a Python tool file that: {description}"},
+            ],
+            "stream": False,
+            "options": {"temperature": 0.25},
+        })
+        r.raise_for_status()
+        content = r.json().get("message", {}).get("content", "")
+
+    content = re.sub(r"^```(?:python)?\n?", "", content.strip(), flags=re.MULTILINE)
+    content = re.sub(r"\n?```\s*$", "", content.strip(), flags=re.MULTILINE)
+    return {"code": content.strip(), "model": model}
+
+
+# ── Agentic chat ──────────────────────────────────────────────────────────────
+
+@app.post("/admin/chat/agentic")
+async def agentic_chat(request: Request):
+    """Streams NDJSON events: tool_call, tool_result, content, error."""
+    from proxy import _normalize_tool_calls
+    body_json = await request.json()
+    messages: list = list(body_json.get("messages", []))
+    model: str = body_json.get("model", "")
+
+    if model == "mollama":
+        result = await core.select_best_model_for_prompt(messages)
+        if result and result[2]:
+            _, target_url, model = result
+        else:
+            fb = await core.get_any_available_model()
+            if fb:
+                _, target_url, model = fb
+            else:
+                return Response(content=json.dumps({"error": "No models available"}), status_code=503)
+    else:
+        active = core.get_active_instances()
+        if not active:
+            return Response(content=json.dumps({"error": "No instances available"}), status_code=503)
+        _, target_url = active[0]
+
+    mcp_schemas = mcp_manager.get_all_tool_schemas()
+    if mcp_schemas:
+        registry.set_extra_schemas(mcp_schemas)
+    tools = list(registry.schemas)
+
+    async def event_stream():
+        try:
+            current_messages = list(messages)
+            sys_prompt = core.get_system_prompt()
+            if sys_prompt and (not current_messages or current_messages[0].get("role") != "system"):
+                current_messages.insert(0, {"role": "system", "content": sys_prompt})
+
+            for _loop in range(8):
+                try:
+                    async with httpx.AsyncClient(timeout=120) as client:
+                        resp = await client.post(
+                            f"{target_url.rstrip('/')}/api/chat",
+                            json={
+                                "model": model,
+                                "messages": current_messages,
+                                **({"tools": tools} if tools else {}),
+                                "stream": False,
+                            },
+                        )
+                except Exception as e:
+                    yield json.dumps({"type": "error", "error": str(e)}) + "\n"
+                    return
+
+                if resp.status_code != 200:
+                    yield json.dumps({"type": "error", "error": f"Upstream {resp.status_code}"}) + "\n"
+                    return
+
+                try:
+                    resp_data = resp.json()
+                except Exception as e:
+                    yield json.dumps({"type": "error", "error": f"Failed to parse response: {e}"}) + "\n"
+                    return
+
+                msg = resp_data.get("message", {}) or {}
+                content = msg.get("content", "") or ""
+
+                try:
+                    tool_calls, _ = _normalize_tool_calls(msg, content)
+                except Exception as e:
+                    yield json.dumps({"type": "error", "error": f"Tool call parse error: {e}"}) + "\n"
+                    return
+
+                if not tool_calls:
+                    yield json.dumps({"type": "content", "text": content, "model": resp_data.get("model", model), "done": True}) + "\n"
+                    return
+
+                if content:
+                    yield json.dumps({"type": "content", "text": content, "done": False}) + "\n"
+
+                current_messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
+
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    tc_name = func.get("name", "")
+                    args = func.get("arguments", {})
+                    tc_id = tc.get("id") or str(uuid.uuid4())[:8]
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except Exception:
+                            args = {}
+
+                    yield json.dumps({"type": "tool_call", "id": tc_id, "name": tc_name, "args": args}) + "\n"
+
+                    try:
+                        result_val = await registry.aexecute(tc_name, args)
+                        result_str, ok = str(result_val), True
+                    except Exception as e:
+                        result_str, ok = str(e), False
+
+                    yield json.dumps({"type": "tool_result", "id": tc_id, "name": tc_name, "result": result_str, "ok": ok}) + "\n"
+                    current_messages.append({"role": "tool", "tool_call_id": tc_id, "name": tc_name, "content": result_str})
+
+            yield json.dumps({"type": "error", "error": "Max tool iterations reached"}) + "\n"
+        except Exception as e:
+            yield json.dumps({"type": "error", "error": f"Internal error: {e}"}) + "\n"
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
+@app.post("/admin/chat/compact")
+async def compact_chat(request: Request):
+    """Summarise all but the last 3 messages into a single summary system message."""
+    from proxy import _compress_context
+    body_json = await request.json()
+    messages: list = list(body_json.get("messages", []))
+    model: str = body_json.get("model", "")
+
+    if model == "mollama":
+        fb = await core.get_any_available_model()
+        if fb:
+            _, target_url, model = fb
+        else:
+            raise HTTPException(status_code=503, detail="No models available")
+    else:
+        active = core.get_active_instances()
+        if not active:
+            raise HTTPException(status_code=503, detail="No instances available")
+        _, target_url = active[0]
+
+    # Force-enable compression for this call by temporarily patching settings
+    import json as _json
+    from pathlib import Path as _Path
+    settings_path = _Path("/data/settings.json")
+    original = {}
+    try:
+        if settings_path.exists():
+            original = _json.loads(settings_path.read_text())
+        patched = {**original, "context_compression": True}
+        settings_path.write_text(_json.dumps(patched))
+        compacted = await _compress_context(messages, model, target_url)
+    finally:
+        settings_path.write_text(_json.dumps(original))
+
+    return {"messages": compacted, "compacted": len(messages) != len(compacted)}
+
+
+@app.post("/admin/tools/upload")
+async def upload_tool_file(request: Request) -> dict:
+    form = await request.form()
+    file = form.get("file")
+    if not file:
+        raise HTTPException(status_code=400, detail="missing file")
+    content = await file.read()
+    path = file.filename
+    if not path:
+        raise HTTPException(status_code=400, detail="missing filename")
+    try:
+        registry.write_tool_file(path, content.decode("utf-8", errors="replace"))
+        return {"ok": True, "path": path}
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ── MCP Servers ───────────────────────────────────────────────────────────────

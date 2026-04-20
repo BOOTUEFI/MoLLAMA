@@ -2,7 +2,7 @@ import { motion, AnimatePresence } from "framer-motion"
 import {
   X, Cpu, Activity, CheckCircle2, AlertCircle, Loader2, Server,
   Database, RefreshCcw, Wrench, Shield, Terminal, Globe,
-  Zap, GitBranch, BanIcon, Star, Circle,
+  Zap, GitBranch, BanIcon, Star,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
@@ -15,6 +15,7 @@ import {
 import { useConnectivity } from "@/hooks/use-connectivity"
 import { useSystemStats } from "@/hooks/use-system-stats"
 import { useEffect, useRef, useState, useMemo, useCallback } from "react"
+import { InferenceSettings } from "./McpManager"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -382,10 +383,11 @@ export function SettingsPanel({ selectedModel, onModelChange, onClose }: Props) 
         <Tabs defaultValue="overview" className="flex-1 flex flex-col overflow-hidden">
           <TabsList className="shrink-0 mx-4 mt-3 rounded-xl bg-secondary/12 border border-border/18 p-0.5 gap-0.5">
             {[
-              { v: "overview", icon: <Activity size={10} />, label: "Overview" },
-              { v: "cluster",  icon: <Server size={10} />,   label: "Cluster"  },
-              { v: "ollama",   icon: <Shield size={10} />,   label: "Ollama"   },
-              { v: "model",    icon: <Database size={10} />, label: "Model"    },
+              { v: "overview",   icon: <Activity  size={10} />, label: "Overview"  },
+              { v: "cluster",    icon: <Server    size={10} />, label: "Cluster"   },
+              { v: "ollama",     icon: <Shield    size={10} />, label: "Ollama"    },
+              { v: "model",      icon: <Database  size={10} />, label: "Model"     },
+              { v: "inference",  icon: <Zap       size={10} />, label: "Inference" },
             ].map(t => (
               <TabsTrigger
                 key={t.v} value={t.v}
@@ -572,6 +574,22 @@ export function SettingsPanel({ selectedModel, onModelChange, onClose }: Props) 
                 <DataRow label="Managed Instances" value={managedNodes} />
                 <DataRow label="Total Cluster Nodes" value={totalNodes} />
                 <DataRow label="Update Check" value="Every 500ms" />
+              </SectionBox>
+            </TabsContent>
+
+            {/* ─── Inference ─── */}
+            <TabsContent value="inference" className="mt-0 space-y-3">
+              <SectionBox title="Context Management" icon={<Zap size={10} />}>
+                <p className="text-[9px] font-mono text-muted-foreground/50 leading-relaxed mb-2">
+                  Controls how chat history is handled between messages to keep the context window efficient.
+                </p>
+                <InferenceSettings />
+              </SectionBox>
+
+              <SectionBox title="Routing Info" icon={<GitBranch size={10} />}>
+                <DataRow label="Compact trigger" value="Every 3 messages" />
+                <DataRow label="History kept" value="Last 3 messages" />
+                <DataRow label="Compression" value="LLM summarisation" />
               </SectionBox>
             </TabsContent>
 

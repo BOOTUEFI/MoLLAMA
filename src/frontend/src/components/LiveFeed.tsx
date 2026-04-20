@@ -2,11 +2,12 @@ import {
   useState, useEffect, useLayoutEffect, useRef, useCallback, type ReactNode,
 } from "react"
 import { motion, AnimatePresence } from "framer-motion"
+import { useQueryClient } from "@tanstack/react-query"
 import { useEvents } from "@/hooks/use-api"
 import { fetchStreamLog, type StreamEntry } from "@/lib/api"
+import { useWsStatus } from "@/hooks/use-websocket"
 import { Card } from "@/components/ui/card"
 import { Activity, ArrowDown, ArrowUp, Terminal, Brain } from "lucide-react"
-import { toast } from "sonner"
 
 type Tab = "requests" | "stream"
 
@@ -96,23 +97,35 @@ function useLerpScroll(factor = 0.1) {
 // ── Stream log hook ───────────────────────────────────────────────────────────
 
 export function useStreamLog(intervalMs = 500) {
+  const queryClient = useQueryClient()
+  const { connected } = useWsStatus()
   const [streams, setStreams] = useState<StreamEntry[]>([])
 
+  // When WS is connected, read directly from query cache (populated by WS broadcast)
   useEffect(() => {
+    if (connected) {
+      const cached = queryClient.getQueryData<{ streams: StreamEntry[] }>(["streams"])
+      if (cached?.streams) setStreams(cached.streams)
+      return queryClient.getQueryCache().subscribe(event => {
+        if ((event.query.queryKey as string[])[0] === "streams") {
+          const d = queryClient.getQueryData<{ streams: StreamEntry[] }>(["streams"])
+          if (d?.streams) setStreams(d.streams)
+        }
+      })
+    }
+
+    // Fallback: HTTP polling when WS is disconnected
     let cancelled = false
     const poll = async () => {
       try {
         const res = await fetchStreamLog(50)
         if (!cancelled) setStreams(res.streams)
-      } catch (err: any) {
-        if (cancelled) return
-        toast.error("Stream fetch failed", { description: err.message })
-      }
+      } catch { /* ignore */ }
     }
     poll()
     const id = setInterval(poll, intervalMs)
     return () => { cancelled = true; clearInterval(id) }
-  }, [intervalMs])
+  }, [connected, queryClient, intervalMs])
 
   return streams
 }

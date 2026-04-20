@@ -18,37 +18,42 @@ import {
   saveSystemPrompt,
   deleteModel,
 } from "@/lib/api"
+import { useWsStatus } from "@/hooks/use-websocket"
 
 export const useInstances = (options?: { refetchInterval?: number | false }) => {
+  const { connected } = useWsStatus()
   return useQuery({
     queryKey: ["instances"],
     queryFn: fetchInstances,
-    refetchInterval: 3000,
+    refetchInterval: connected ? false : 3000,
     ...options,
   })
 }
 
 export const useEvents = (limit = 200) => {
+  const { connected } = useWsStatus()
   return useQuery({
     queryKey: ["events", limit],
     queryFn: () => fetchEvents(limit),
-    refetchInterval: 1000,
+    refetchInterval: connected ? false : 1000,
   })
 }
 
 export const useProcessing = () => {
+  const { connected } = useWsStatus()
   return useQuery({
     queryKey: ["processing"],
     queryFn: fetchProcessing,
-    refetchInterval: 1000,
+    refetchInterval: connected ? false : 1000,
   })
 }
 
 export const useModels = () => {
+  const { connected } = useWsStatus()
   return useQuery({
     queryKey: ["models"],
     queryFn: fetchModels,
-    refetchInterval: 3000,
+    refetchInterval: connected ? false : 3000,
   })
 }
 
@@ -174,13 +179,24 @@ export const useDeleteModel = () => {
 // ── Tools hooks ───────────────────────────────────────────────────────────────
 
 import {
-  fetchTools, fetchToolFile, saveToolFile, deleteToolFile, reloadTools,
+  fetchTools, fetchToolFile, saveToolFile, deleteToolFile, reloadTools, runTool, generateTool,
   fetchMcpServers, addMcpServer, removeMcpServer, connectMcpServer, disconnectMcpServer,
-  fetchAppSettings, saveAppSettings,
+  fetchAppSettings, saveAppSettings, fetchModelContextLength,
 } from "@/lib/api"
 
-export const useTools = () =>
-  useQuery({ queryKey: ["tools"], queryFn: fetchTools, staleTime: 5000 })
+export const useModelContextLength = (model: string) =>
+  useQuery({
+    queryKey: ["modelContextLength", model],
+    queryFn: () => fetchModelContextLength(model),
+    enabled: !!model && model !== "mollama",
+    staleTime: 5 * 60 * 1000, // 5 min — model context doesn't change
+    placeholderData: 8192,
+  })
+
+export const useTools = () => {
+  const { connected } = useWsStatus()
+  return useQuery({ queryKey: ["tools"], queryFn: fetchTools, staleTime: connected ? Infinity : 5000, refetchInterval: connected ? false : 10000 })
+}
 
 export const useToolFile = (path: string | null) =>
   useQuery({
@@ -214,10 +230,18 @@ export const useReloadTools = () => {
   })
 }
 
+export const useRunTool = () =>
+  useMutation({ mutationFn: ({ tool, args }: { tool: string; args: Record<string, unknown> }) => runTool(tool, args) })
+
+export const useGenerateTool = () =>
+  useMutation({ mutationFn: ({ description, model }: { description: string; model: string }) => generateTool(description, model) })
+
 // ── MCP hooks ─────────────────────────────────────────────────────────────────
 
-export const useMcpServers = () =>
-  useQuery({ queryKey: ["mcpServers"], queryFn: fetchMcpServers, refetchInterval: 3000 })
+export const useMcpServers = () => {
+  const { connected } = useWsStatus()
+  return useQuery({ queryKey: ["mcpServers"], queryFn: fetchMcpServers, refetchInterval: connected ? false : 3000 })
+}
 
 export const useAddMcpServer = () => {
   const queryClient = useQueryClient()
@@ -253,8 +277,10 @@ export const useDisconnectMcpServer = () => {
 
 // ── Settings hooks ────────────────────────────────────────────────────────────
 
-export const useAppSettings = () =>
-  useQuery({ queryKey: ["appSettings"], queryFn: fetchAppSettings, staleTime: 5000 })
+export const useAppSettings = () => {
+  const { connected } = useWsStatus()
+  return useQuery({ queryKey: ["appSettings"], queryFn: fetchAppSettings, staleTime: connected ? Infinity : 5000, refetchInterval: connected ? false : 10000 })
+}
 
 export const useSaveAppSettings = () => {
   const queryClient = useQueryClient()

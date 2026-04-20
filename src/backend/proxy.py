@@ -15,8 +15,7 @@ from tools import registry
 
 # ── Context compression ────────────────────────────────────────────────────────
 
-COMPRESSION_THRESHOLD_CHARS = 12_000
-COMPRESSION_KEEP_RECENT = 6
+COMPRESSION_KEEP_RECENT = 3
 
 
 def _load_settings() -> dict:
@@ -30,13 +29,9 @@ def _load_settings() -> dict:
 
 
 async def _compress_context(messages: list[dict], model: str, target_url: str) -> list[dict]:
-    """Summarise old messages if context compression is enabled and conversation is long."""
+    """Auto-compact: summarise old messages every 3 messages when enabled."""
     settings = _load_settings()
     if not settings.get("context_compression", False):
-        return messages
-
-    total_chars = sum(len(str(m.get("content", ""))) for m in messages)
-    if total_chars < COMPRESSION_THRESHOLD_CHARS:
         return messages
 
     system_msgs = [m for m in messages if m.get("role") == "system"]
@@ -252,7 +247,7 @@ async def _proxy(request: Request, upstream_path: str) -> Response:
     
     headers = {
         k: v for k, v in request.headers.items()
-        if k.lower() not in ("host", "content-length", "transfer-encoding")
+        if k.lower() not in ("host", "content-length", "transfer-encoding", "authorization")
     }
 
     is_stream = True
@@ -419,7 +414,7 @@ async def _proxy(request: Request, upstream_path: str) -> Response:
                 if is_stream:
                     req = client.build_request(method=request.method, url=url, headers=headers, content=body)
                     resp = await client.send(req, stream=True)
-                    if resp.status_code >= 500:
+                    if resp.status_code in (401, 403, 429) or resp.status_code >= 500:
                         await resp.aclose()
                         continue
                     
@@ -434,7 +429,7 @@ async def _proxy(request: Request, upstream_path: str) -> Response:
                 else:
                     resp = await client.request(method=request.method, url=url, headers=headers, content=body)
                     _ev.set_processing(target_name, False)
-                    if resp.status_code >= 500: continue
+                    if resp.status_code in (401, 403, 429) or resp.status_code >= 500: continue
                     return Response(content=resp.content, status_code=resp.status_code, headers=dict(resp.headers))
 
             except Exception:

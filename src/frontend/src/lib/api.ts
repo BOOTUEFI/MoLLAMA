@@ -61,9 +61,17 @@ export interface StatsResponse {
 }
 
 export interface ChatMessage {
-  role: "user" | "assistant" | "system"
+  role: "user" | "assistant" | "system" | "tool"
   content: string
+  images?: string[]   // base64-encoded images for multimodal models
+  tool_calls?: Array<{ id?: string; function: { name: string; arguments: Record<string, unknown> | string } }>
 }
+
+export type AgenticEvent =
+  | { type: "content"; text: string; model: string; done: boolean }
+  | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
+  | { type: "tool_result"; id: string; name: string; result: string; ok: boolean }
+  | { type: "error"; error: string }
 
 export interface StreamEntry {
   req_id: string
@@ -264,6 +272,14 @@ export const saveSystemPrompt = async (prompt: string): Promise<{ ok: boolean }>
 
 // ── Admin: Models ─────────────────────────────────────────────────────────────
 
+export const fetchModelContextLength = async (model: string): Promise<number> => {
+  if (!model || model === "mollama") return 8192
+  const r = await fetch(`${API_BASE_URL}/admin/models/context-length?model=${encodeURIComponent(model)}`)
+  if (!r.ok) return 4096
+  const data = await r.json()
+  return data.context_length ?? 4096
+}
+
 export const fetchModels = async (): Promise<string[]> => {
   const response = await fetch(`${API_BASE_URL}/admin/models`)
   if (!response.ok) throw new Error("Failed to fetch models")
@@ -342,6 +358,7 @@ export async function* pullModelToInstance(
 // ── Tools CRUD ────────────────────────────────────────────────────────────────
 
 export interface ToolFile {
+  ext?: string
   path: string
   type: "simple" | "folder"
   functions: string[]
@@ -384,6 +401,26 @@ export const deleteToolFile = async (path: string): Promise<{ ok: boolean }> => 
     body: JSON.stringify({ path }),
   })
   if (!r.ok) throw new Error("Failed to delete tool file")
+  return r.json()
+}
+
+export const runTool = async (tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; result?: string; error?: string }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/tools/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tool, args }),
+  })
+  if (!r.ok) throw new Error("Run failed")
+  return r.json()
+}
+
+export const generateTool = async (description: string, model: string): Promise<{ code: string; model: string }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/tools/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ description, model }),
+  })
+  if (!r.ok) throw new Error(await r.text())
   return r.json()
 }
 
@@ -470,12 +507,15 @@ export const saveAppSettings = async (settings: Partial<AppSettings>): Promise<{
 
 export const sendChatMessage = async function* (
   messages: ChatMessage[],
-  model: string
+  model: string,
+  signal?: AbortSignal,
+  options?: { think?: boolean }
 ): AsyncGenerator<{ content: string; model: string }> {
   const response = await fetch(`${API_BASE_URL}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages, stream: true }),
+    body: JSON.stringify({ model, messages, stream: true, ...(options?.think && { think: true }) }),
+    signal,
   })
 
   if (!response.ok) {
@@ -513,4 +553,66 @@ export const sendChatMessage = async function* (
       }
     }
   }
+}
+
+export const sendAgenticMessage = async function* (
+  messages: ChatMessage[],
+  model: string,
+  signal?: AbortSignal
+): AsyncGenerator<AgenticEvent> {
+  const response = await fetch(`${API_BASE_URL}/admin/chat/agentic`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model, messages }),
+    signal,
+  })
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}))
+    throw new Error(err.error || "Agentic request failed")
+  }
+  if (!response.body) throw new Error("No response body")
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split("\n")
+    buffer = lines.pop() || ""
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      try {
+        yield JSON.parse(trimmed) as AgenticEvent
+      } catch { /* skip */ }
+    }
+  }
+}
+
+export const compactChatMessages = async (
+  messages: ChatMessage[],
+  model: string
+): Promise<{ messages: ChatMessage[]; compacted: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/chat/compact`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, model }),
+  })
+  if (!r.ok) throw new Error(await r.text())
+  return r.json()
+}
+
+export const uploadToolFile = async (file: File): Promise<{ ok: boolean; path: string }> => {
+  const fd = new FormData()
+  fd.append("file", file)
+  const response = await fetch(`${API_BASE_URL}/admin/tools/upload`, { method: "POST", body: fd })
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}))
+    throw new Error(err.detail || "Upload failed")
+  }
+  return response.json()
 }

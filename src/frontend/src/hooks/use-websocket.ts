@@ -70,6 +70,18 @@ export function useWebSocketProvider(): WsStatus {
         if (msg.processing) {
           queryClient.setQueryData(["processing"], msg.processing)
         }
+        if (msg.models) {
+          queryClient.setQueryData(["models"], msg.models)
+        }
+        if (msg.mcpServers) {
+          queryClient.setQueryData(["mcpServers"], msg.mcpServers)
+        }
+        if (msg.tools) {
+          queryClient.setQueryData(["tools"], msg.tools)
+        }
+        if (msg.appSettings) {
+          queryClient.setQueryData(["appSettings"], msg.appSettings)
+        }
       } catch {
         // ignore parse errors
       }

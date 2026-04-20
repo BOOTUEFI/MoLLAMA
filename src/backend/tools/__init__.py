@@ -146,27 +146,44 @@ class ToolRegistry:
 
     # ── File management ────────────────────────────────────────────────────────
 
+    _EDITABLE_EXTS = {".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".sh", ".env", ".cfg", ".ini"}
+
     def list_tool_files(self) -> List[dict]:
         tools_dir = Path(__file__).parent
         result = []
         for item in sorted(tools_dir.iterdir()):
             if item.name.startswith("__"):
                 continue
-            if item.is_file() and item.suffix == ".py":
-                mod = self._try_load(item)
-                funcs = [n for n, _ in inspect.getmembers(mod, inspect.isfunction) if not n.startswith("_")] if mod else []
-                result.append({"path": item.name, "type": "simple", "functions": funcs})
+            if item.is_file() and item.suffix.lower() in self._EDITABLE_EXTS:
+                funcs: List[str] = []
+                if item.suffix.lower() == ".py":
+                    mod = self._try_load(item)
+                    funcs = [n for n, _ in inspect.getmembers(mod, inspect.isfunction) if not n.startswith("_")] if mod else []
+                result.append({
+                    "path": item.name,
+                    "type": "simple",
+                    "functions": funcs,
+                    "ext": item.suffix.lstrip("."),
+                })
             elif item.is_dir() and (item / "entry.py").exists():
-                context_path = item / "CONTEXT.MD"
                 entry_mod = self._try_load(item / "entry.py")
                 funcs = [n for n, _ in inspect.getmembers(entry_mod, inspect.isfunction) if not n.startswith("_")] if entry_mod else []
                 result.append({
                     "path": f"{item.name}/entry.py",
-                    "context_path": f"{item.name}/CONTEXT.MD" if context_path.exists() else None,
-                    "context": context_path.read_text() if context_path.exists() else "",
                     "type": "folder",
                     "functions": funcs,
+                    "ext": "py",
                 })
+                for sub in sorted(item.iterdir()):
+                    if sub.name.startswith("__") or sub.name == "entry.py":
+                        continue
+                    if sub.is_file() and sub.suffix.lower() in self._EDITABLE_EXTS:
+                        result.append({
+                            "path": f"{item.name}/{sub.name}",
+                            "type": "simple",
+                            "functions": [],
+                            "ext": sub.suffix.lstrip("."),
+                        })
         return result
 
     def read_tool_file(self, rel_path: str) -> str:
