@@ -788,52 +788,103 @@ async def agentic_chat(request: Request):
             if sys_prompt and (not current_messages or current_messages[0].get("role") != "system"):
                 current_messages.insert(0, {"role": "system", "content": sys_prompt})
 
-            for _loop in range(8):
+            routed_model = model  # track the actual model used (for mollama routing)
+
+            async with httpx.AsyncClient(timeout=None) as client:
+              for _loop in range(8):
+
+                # ── Stream upstream and relay deltas live; buffer tool_calls ──
+                accumulated_content = ""
+                tool_calls_buffer: list[dict] = []
+                final_model = routed_model
+                xml_sniff_cutoff = 64  # once past this many chars with no "<" we stop watching for XML tool calls
+
                 try:
-                    async with httpx.AsyncClient(timeout=120) as client:
-                        resp = await client.post(
-                            f"{target_url.rstrip('/')}/api/chat",
-                            json={
-                                "model": model,
-                                "messages": current_messages,
-                                **({"tools": tools} if tools else {}),
-                                "stream": False,
-                            },
-                        )
+                    async with client.stream(
+                        "POST",
+                        f"{target_url.rstrip('/')}/api/chat",
+                        json={
+                            "model": routed_model,
+                            "messages": current_messages,
+                            **({"tools": tools} if tools else {}),
+                            "stream": True,
+                        },
+                    ) as resp:
+                        if resp.status_code != 200:
+                            err_body = (await resp.aread()).decode("utf-8", errors="replace")[:500]
+                            yield json.dumps({"type": "error", "error": f"Upstream {resp.status_code}: {err_body}"}) + "\n"
+                            return
+
+                        async for raw_line in resp.aiter_lines():
+                            line = raw_line.strip()
+                            if not line:
+                                continue
+                            try:
+                                chunk = json.loads(line)
+                            except Exception:
+                                continue
+
+                            if chunk.get("model"):
+                                final_model = chunk["model"]
+
+                            msg = chunk.get("message", {}) or {}
+                            delta_text = msg.get("content", "") or ""
+                            chunk_tool_calls = msg.get("tool_calls") or []
+
+                            if chunk_tool_calls:
+                                for tc in chunk_tool_calls:
+                                    if isinstance(tc, dict):
+                                        tc = dict(tc)
+                                        tc.setdefault("id", str(uuid.uuid4())[:8])
+                                        tool_calls_buffer.append(tc)
+
+                            if delta_text:
+                                accumulated_content += delta_text
+                                # If the model is emitting XML-style tool calls, suppress live text
+                                # until the turn finishes so we can parse it as a tool call instead.
+                                looks_xml = (
+                                    "<function_calls>" in accumulated_content
+                                    or (len(accumulated_content) < xml_sniff_cutoff and accumulated_content.lstrip().startswith("<"))
+                                )
+                                if not looks_xml:
+                                    yield json.dumps({"type": "delta", "text": delta_text}) + "\n"
+
+                            if chunk.get("done"):
+                                break
                 except Exception as e:
                     yield json.dumps({"type": "error", "error": str(e)}) + "\n"
                     return
 
-                if resp.status_code != 200:
-                    yield json.dumps({"type": "error", "error": f"Upstream {resp.status_code}"}) + "\n"
+                # Fallback: parse XML tool calls out of the accumulated content if
+                # the model didn't use the native tool_calls field.
+                if not tool_calls_buffer and "<function_calls>" in accumulated_content:
+                    xml_calls, _ = _normalize_tool_calls({}, accumulated_content)
+                    tool_calls_buffer = xml_calls
+
+                if not tool_calls_buffer:
+                    # No tool calls — we already streamed the content live. Finish.
+                    yield json.dumps({"type": "done", "text": accumulated_content, "model": final_model}) + "\n"
                     return
 
-                try:
-                    resp_data = resp.json()
-                except Exception as e:
-                    yield json.dumps({"type": "error", "error": f"Failed to parse response: {e}"}) + "\n"
-                    return
+                # Has tool calls. If any plain text preceded them (not already streamed
+                # as deltas because it looked like XML), surface it as content_done.
+                if accumulated_content and "<function_calls>" in accumulated_content:
+                    pre = accumulated_content.split("<function_calls>", 1)[0].strip()
+                    if pre:
+                        yield json.dumps({"type": "content_done", "text": pre}) + "\n"
+                elif accumulated_content:
+                    # We already streamed the text as deltas; close the block so the
+                    # UI stops rendering the streaming cursor before tool steps.
+                    yield json.dumps({"type": "content_done", "text": accumulated_content}) + "\n"
 
-                msg = resp_data.get("message", {}) or {}
-                content = msg.get("content", "") or ""
+                current_messages.append({
+                    "role": "assistant",
+                    "content": accumulated_content or "",
+                    "tool_calls": tool_calls_buffer,
+                })
 
-                try:
-                    tool_calls, _ = _normalize_tool_calls(msg, content)
-                except Exception as e:
-                    yield json.dumps({"type": "error", "error": f"Tool call parse error: {e}"}) + "\n"
-                    return
-
-                if not tool_calls:
-                    yield json.dumps({"type": "content", "text": content, "model": resp_data.get("model", model), "done": True}) + "\n"
-                    return
-
-                if content:
-                    yield json.dumps({"type": "content", "text": content, "done": False}) + "\n"
-
-                current_messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
-
-                for tc in tool_calls:
-                    func = tc.get("function", {})
+                for tc in tool_calls_buffer:
+                    func = tc.get("function", {}) or {}
                     tc_name = func.get("name", "")
                     args = func.get("arguments", {})
                     tc_id = tc.get("id") or str(uuid.uuid4())[:8]

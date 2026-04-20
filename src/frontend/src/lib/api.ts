@@ -68,7 +68,9 @@ export interface ChatMessage {
 }
 
 export type AgenticEvent =
-  | { type: "content"; text: string; model: string; done: boolean }
+  | { type: "delta"; text: string }
+  | { type: "content_done"; text: string }
+  | { type: "done"; text: string; model: string }
   | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
   | { type: "tool_result"; id: string; name: string; result: string; ok: boolean }
   | { type: "error"; error: string }

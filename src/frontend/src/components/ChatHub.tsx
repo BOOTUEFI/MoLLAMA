@@ -30,6 +30,7 @@ interface Session {
   id: string
   name: string
   messages: ChatMessage[]
+  displays?: DisplayMsg[]
 }
 
 function uuid(): string {
@@ -360,7 +361,7 @@ function ModelPicker({ model, models, routedModel, isLoading, isMollama, onModel
       <DropdownMenuContent
         align="end"
         sideOffset={6}
-        className="min-w-[180px] max-w-[240px] max-h-[280px] overflow-y-auto rounded-xl border border-white/[0.07] bg-[#0d0d1c]/98 backdrop-blur-2xl shadow-2xl shadow-black/50 p-1.5"
+        className="min-w-[180px] max-w-[240px] max-h-[280px] overflow-y-auto rounded-xl border border-white/[0.07] bg-[#0d0d1c]/98 backdrop-blur-2xl shadow-2xl shadow-black/50 p-1.5 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-border/25 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb:hover]:bg-border/50"
       >
         <DropdownMenuLabel className="px-2 py-1 text-[8px] font-mono uppercase tracking-[0.22em] text-muted-foreground/40">
           Select Model
@@ -403,11 +404,22 @@ interface AgenticStep {
   ok?: boolean
 }
 
+interface AgenticContentBlock { kind: "content"; text: string; streaming?: boolean }
+interface AgenticToolGroup { kind: "tools"; steps: AgenticStep[] }
+type AgenticItem = AgenticContentBlock | AgenticToolGroup
+
 type DisplayMsg =
   | { kind: "chat"; role: "user" | "assistant"; content: string; streaming?: boolean }
-  | { kind: "agentic"; steps: AgenticStep[]; thinkingChunks: string[]; finalContent: string; streaming: boolean }
+  | { kind: "agentic"; items: AgenticItem[]; streaming: boolean; routedModel?: string }
 
 // ── Agentic step detail row ───────────────────────────────────────────────────
+
+const STEP_SCROLL = [
+  "max-h-40 overflow-y-auto",
+  "[&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-transparent",
+  "[&::-webkit-scrollbar-thumb]:bg-border/20 [&::-webkit-scrollbar-thumb]:rounded-full",
+  "[&::-webkit-scrollbar-thumb:hover]:bg-border/40",
+].join(" ")
 
 function AgenticStepRow({ step }: { step: AgenticStep }) {
   const [expanded, setExpanded] = useState(false)
@@ -450,14 +462,14 @@ function AgenticStepRow({ step }: { step: AgenticStep }) {
             <div className="px-2.5 py-2 space-y-2 bg-black/20">
               <div>
                 <div className="text-[7.5px] font-mono uppercase tracking-[0.2em] text-muted-foreground/30 mb-1">Input</div>
-                <pre className="text-[9px] font-mono text-foreground/60 whitespace-pre-wrap break-all leading-relaxed">
+                <pre className={`text-[9px] font-mono text-foreground/60 whitespace-pre-wrap break-all leading-relaxed ${STEP_SCROLL}`}>
                   {JSON.stringify(step.args, null, 2)}
                 </pre>
               </div>
               {step.result !== undefined && (
                 <div>
                   <div className="text-[7.5px] font-mono uppercase tracking-[0.2em] text-muted-foreground/30 mb-1">Output</div>
-                  <pre className="text-[9px] font-mono text-foreground/60 whitespace-pre-wrap break-all leading-relaxed max-h-40 overflow-y-auto">
+                  <pre className={`text-[9px] font-mono text-foreground/60 whitespace-pre-wrap break-all leading-relaxed ${STEP_SCROLL}`}>
                     {step.result}
                   </pre>
                 </div>
@@ -473,8 +485,13 @@ function AgenticStepRow({ step }: { step: AgenticStep }) {
 // ── Agentic response card ─────────────────────────────────────────────────────
 
 function AgenticResponseCard({ msg }: { msg: Extract<DisplayMsg, { kind: "agentic" }> }) {
-  const [stepsOpen, setStepsOpen] = useState(true)
-  const doneCount = msg.steps.filter(s => s.result !== undefined).length
+  const [closedGroups, setClosedGroups] = useState<Set<number>>(new Set())
+
+  const toggleGroup = (idx: number) => setClosedGroups(prev => {
+    const next = new Set(prev)
+    next.has(idx) ? next.delete(idx) : next.add(idx)
+    return next
+  })
 
   return (
     <motion.div
@@ -483,89 +500,101 @@ function AgenticResponseCard({ msg }: { msg: Extract<DisplayMsg, { kind: "agenti
       transition={{ duration: 0.2 }}
       className="flex justify-start"
     >
-      <div className="max-w-[88%] rounded-2xl rounded-tl-none bg-secondary/40 border border-border/10 backdrop-blur-md overflow-hidden shadow-sm">
+      <div className="max-w-[88%] rounded-2xl rounded-tl-none bg-secondary/40 border border-border/10 backdrop-blur-md shadow-sm overflow-hidden">
 
-        {/* Steps / thinking process */}
-        {(msg.steps.length > 0 || msg.streaming) && (
-          <div className={msg.finalContent ? "border-b border-border/15" : ""}>
-            <button
-              onClick={() => setStepsOpen(o => !o)}
-              className="w-full flex items-center gap-2 px-3 py-2 hover:bg-white/[0.02] transition-colors"
-            >
-              <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                {msg.streaming && doneCount < msg.steps.length ? (
-                  <motion.div
-                    animate={{ opacity: [0.4, 1, 0.4] }}
-                    transition={{ duration: 1.2, repeat: Infinity }}
-                    className="w-1.5 h-1.5 rounded-full bg-primary/60 shrink-0"
-                  />
-                ) : msg.streaming ? (
-                  <Loader2 size={8} className="animate-spin text-primary/50 shrink-0" />
-                ) : (
-                  <CheckCircle2 size={8} className="text-emerald-400/60 shrink-0" />
-                )}
-                <span className="text-[8.5px] font-mono text-muted-foreground/50 truncate">
-                  {msg.streaming && msg.steps.length === 0
-                    ? "Thinking…"
-                    : msg.streaming
-                    ? `Step ${doneCount + 1} of ${msg.steps.length}…`
-                    : `${msg.steps.length} step${msg.steps.length !== 1 ? "s" : ""} completed`}
-                </span>
-              </div>
-              <ChevronDown size={8} className={`shrink-0 text-muted-foreground/25 transition-transform ${stepsOpen ? "rotate-180" : ""}`} />
-            </button>
-
-            <AnimatePresence>
-              {stepsOpen && (
-                <motion.div
-                  initial={{ height: 0 }} animate={{ height: "auto" }} exit={{ height: 0 }}
-                  transition={{ duration: 0.15 }}
-                  className="overflow-hidden"
-                >
-                  <div className="px-3 pb-2 space-y-1.5">
-                    {msg.steps.map(step => (
-                      <AgenticStepRow key={step.id} step={step} />
-                    ))}
-                    {msg.streaming && msg.steps.length === 0 && (
-                      <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-primary/[0.04] border border-primary/10">
-                        <motion.div
-                          animate={{ scale: [1, 1.3, 1] }}
-                          transition={{ duration: 0.8, repeat: Infinity }}
-                          className="w-1 h-1 rounded-full bg-primary/50"
-                        />
-                        <span className="text-[9px] font-mono text-primary/50">Waiting for model…</span>
-                      </div>
-                    )}
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
+        {/* Initial streaming: no items yet */}
+        {msg.streaming && msg.items.length === 0 && (
+          <div className="px-3 py-2.5 flex items-center gap-2">
+            <motion.div
+              animate={{ opacity: [0.3, 1, 0.3] }}
+              transition={{ duration: 1.2, repeat: Infinity }}
+              className="w-1.5 h-1.5 rounded-full bg-primary/60 shrink-0"
+            />
+            <span className="text-[8.5px] font-mono text-muted-foreground/50">Thinking…</span>
           </div>
         )}
 
-        {/* Final response */}
-        <div className="px-4 py-3 text-xs leading-relaxed">
-          {!msg.finalContent && msg.streaming ? (
-            <motion.span
-              animate={{ opacity: [0.3, 0.8, 0.3] }}
-              transition={{ duration: 1.1, repeat: Infinity }}
-              className="text-muted-foreground/40 text-[10px] font-mono"
-            >
-              {msg.steps.length > 0 ? "Composing response…" : "Thinking…"}
-            </motion.span>
-          ) : (
-            <div className="space-y-1">
-              {renderContent(msg.finalContent)}
-              {msg.streaming && msg.finalContent && (
+        {/* Render items in sequence — tools groups + content blocks interleaved */}
+        {msg.items.map((item, idx) => {
+          if (item.kind === "tools") {
+            const isOpen = !closedGroups.has(idx)
+            const doneCt = item.steps.filter(s => s.result !== undefined).length
+            const running = doneCt < item.steps.length && msg.streaming
+            const currentStep = item.steps[doneCt]
+
+            return (
+              <div key={idx} className={idx > 0 ? "border-t border-border/10" : ""}>
+                <button
+                  onClick={() => toggleGroup(idx)}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/[0.02] transition-colors"
+                >
+                  <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                    {running ? (
+                      <motion.div
+                        animate={{ opacity: [0.4, 1, 0.4] }}
+                        transition={{ duration: 1.2, repeat: Infinity }}
+                        className="w-1.5 h-1.5 rounded-full bg-primary/60 shrink-0"
+                      />
+                    ) : (
+                      <CheckCircle2 size={8} className="text-emerald-400/60 shrink-0" />
+                    )}
+                    <span className="text-[8.5px] font-mono text-muted-foreground/50 truncate">
+                      {running && currentStep
+                        ? `Running ${currentStep.name}…`
+                        : `${item.steps.length} tool${item.steps.length !== 1 ? "s" : ""} used`}
+                    </span>
+                  </div>
+                  <ChevronDown size={8} className={`shrink-0 text-muted-foreground/25 transition-transform ${isOpen ? "rotate-180" : ""}`} />
+                </button>
+
+                <AnimatePresence>
+                  {isOpen && (
+                    <motion.div
+                      initial={{ height: 0 }} animate={{ height: "auto" }} exit={{ height: 0 }}
+                      transition={{ duration: 0.15 }}
+                      className="overflow-hidden"
+                    >
+                      <div className="px-3 pb-2 pt-1 space-y-1.5 border-t border-border/[0.06]">
+                        {item.steps.map(step => (
+                          <AgenticStepRow key={step.id} step={step} />
+                        ))}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            )
+          }
+
+          // Content block
+          return (
+            <div key={idx} className={[
+              "px-4 py-3 text-xs leading-relaxed",
+              idx > 0 ? "border-t border-border/10" : "",
+            ].join(" ")}>
+              {!item.text && item.streaming ? (
                 <motion.span
-                  animate={{ opacity: [1, 0] }}
-                  transition={{ duration: 0.55, repeat: Infinity, repeatType: "reverse" }}
-                  className="inline-block w-[5px] h-[11px] bg-foreground/40 ml-px align-middle"
-                />
+                  animate={{ opacity: [0.3, 0.8, 0.3] }}
+                  transition={{ duration: 1.1, repeat: Infinity }}
+                  className="text-muted-foreground/40 text-[10px] font-mono"
+                >
+                  Composing response…
+                </motion.span>
+              ) : (
+                <div className="space-y-1">
+                  {renderContent(item.text)}
+                  {item.streaming && item.text && (
+                    <motion.span
+                      animate={{ opacity: [1, 0] }}
+                      transition={{ duration: 0.55, repeat: Infinity, repeatType: "reverse" }}
+                      className="inline-block w-[5px] h-[11px] bg-foreground/40 ml-px align-middle"
+                    />
+                  )}
+                </div>
               )}
             </div>
-          )}
-        </div>
+          )
+        })}
       </div>
     </motion.div>
   )
@@ -606,7 +635,7 @@ function SessionsPanel({
             <Plus size={9} /> New
           </button>
         </div>
-        <div className="max-h-72 overflow-y-auto divide-y divide-border/20">
+        <div className="max-h-72 overflow-y-auto divide-y divide-border/20 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-border/25 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb:hover]:bg-border/50">
           {sessions.map(s => (
             <div
               key={s.id}
@@ -728,12 +757,22 @@ export function ChatHub({ model, models = [], onModelChange }: ChatHubProps) {
 
   // Rebuild display from session messages when switching sessions
   useEffect(() => {
-    const rebuilt: DisplayMsg[] = []
-    const msgs = activeSession.messages.filter(m => m.role === "user" || m.role === "assistant")
-    for (let i = 0; i < msgs.length; i++) {
-      rebuilt.push({ kind: "chat", role: msgs[i].role as "user" | "assistant", content: msgs[i].content })
+    if (activeSession.displays && activeSession.displays.length > 0) {
+      // Restore full display (includes agentic cards with tool call history)
+      setDisplay(activeSession.displays.map(d => {
+        // Ensure no items are left streaming from a previous session
+        if (d.kind === "agentic") return { ...d, streaming: false, items: d.items.map(i => i.kind === "content" ? { ...i, streaming: false } : i) }
+        if (d.kind === "chat") return { ...d, streaming: false }
+        return d
+      }))
+    } else {
+      const rebuilt: DisplayMsg[] = []
+      const msgs = activeSession.messages.filter(m => m.role === "user" || m.role === "assistant")
+      for (const m of msgs) {
+        rebuilt.push({ kind: "chat", role: m.role as "user" | "assistant", content: m.content })
+      }
+      setDisplay(rebuilt)
     }
-    setDisplay(rebuilt)
     setRoutedModel(null)
   }, [activeId])
 
@@ -767,7 +806,11 @@ export function ChatHub({ model, models = [], onModelChange }: ChatHubProps) {
     // Finalise any streaming display items
     setDisplay(prev => prev.map(d => {
       if (d.kind === "chat" && d.streaming) return { ...d, streaming: false }
-      if (d.kind === "agentic" && d.streaming) return { ...d, streaming: false }
+      if (d.kind === "agentic" && d.streaming) return {
+        ...d,
+        streaming: false,
+        items: d.items.map(i => i.kind === "content" ? { ...i, streaming: false } : i),
+      }
       return d
     }))
     setIsLoading(false)
@@ -907,23 +950,19 @@ export function ChatHub({ model, models = [], onModelChange }: ChatHubProps) {
     abortRef.current = ctrl
 
     if (useAgentic) {
-      // Agentic mode — unified card with collapsible thought process
-      const initAgentic: Extract<DisplayMsg, { kind: "agentic" }> = {
-        kind: "agentic", steps: [], thinkingChunks: [], finalContent: "", streaming: true,
-      }
-      setDisplay(prev => [...prev, initAgentic])
+      setDisplay(prev => [...prev, { kind: "agentic", items: [], streaming: true }])
 
       try {
-        // Mutable state that we clone into React on each event
-        let steps: AgenticStep[] = []
-        let thinkingChunks: string[] = []
-        let finalContent = ""
+        // Mutable items array — updated on each event then pushed to React state
+        let agenticItems: AgenticItem[] = []
 
-        const pushDisplay = (streaming: boolean) => {
+        // Captures agenticItems by value at call site to avoid closure staleness
+        const pushDisplay = (items: AgenticItem[], streaming: boolean) => {
+          const snapshot = [...items]
           setDisplay(prev => {
             const next = [...prev]
             const idx = next.findLastIndex(d => d.kind === "agentic")
-            if (idx >= 0) next[idx] = { kind: "agentic", steps: [...steps], thinkingChunks: [...thinkingChunks], finalContent, streaming }
+            if (idx >= 0) next[idx] = { kind: "agentic", items: snapshot, streaming }
             return next
           })
         }
@@ -931,53 +970,113 @@ export function ChatHub({ model, models = [], onModelChange }: ChatHubProps) {
         for await (const ev of sendAgenticMessage(newMessages, model, ctrl.signal)) {
           if (ctrl.signal.aborted) break
 
-          if (ev.type === "tool_call") {
-            steps = [...steps, { id: ev.id, name: ev.name, args: ev.args }]
-            pushDisplay(true)
-          } else if (ev.type === "tool_result") {
-            steps = steps.map(s => s.id === ev.id ? { ...s, result: ev.result, ok: ev.ok } : s)
-            pushDisplay(true)
-          } else if (ev.type === "content") {
-            if (ev.done) {
-              finalContent = ev.text
-              if (isMollama && ev.model) setRoutedModel(ev.model)
-              pushDisplay(false)
+          if (ev.type === "delta") {
+            // Append to last streaming content block (or start a new one)
+            const last = agenticItems[agenticItems.length - 1]
+            if (last?.kind === "content" && last.streaming) {
+              agenticItems = [...agenticItems.slice(0, -1), { kind: "content", text: last.text + ev.text, streaming: true }]
             } else {
-              thinkingChunks = [...thinkingChunks, ev.text]
-              if (isMollama && ev.model) setRoutedModel(ev.model)
-              pushDisplay(true)
+              agenticItems = [...agenticItems, { kind: "content", text: ev.text, streaming: true }]
             }
+            pushDisplay(agenticItems, true)
+
+          } else if (ev.type === "content_done") {
+            // Intermediate content before tool calls — mark block as not streaming
+            const last = agenticItems[agenticItems.length - 1]
+            if (last?.kind === "content") {
+              agenticItems = [...agenticItems.slice(0, -1), { kind: "content", text: ev.text, streaming: false }]
+            } else {
+              agenticItems = [...agenticItems, { kind: "content", text: ev.text, streaming: false }]
+            }
+            pushDisplay(agenticItems, true)
+
+          } else if (ev.type === "tool_call") {
+            // Add step to last tool group, or create a new group
+            const last = agenticItems[agenticItems.length - 1]
+            const newStep: AgenticStep = { id: ev.id, name: ev.name, args: ev.args }
+            if (last?.kind === "tools") {
+              agenticItems = [...agenticItems.slice(0, -1), { kind: "tools", steps: [...last.steps, newStep] }]
+            } else {
+              agenticItems = [...agenticItems, { kind: "tools", steps: [newStep] }]
+            }
+            pushDisplay(agenticItems, true)
+
+          } else if (ev.type === "tool_result") {
+            // Update matching step in the last tool group
+            const lastToolIdx = agenticItems.map((it, i) => it.kind === "tools" ? i : -1).filter(i => i >= 0).pop() ?? -1
+            if (lastToolIdx >= 0) {
+              const group = agenticItems[lastToolIdx] as AgenticToolGroup
+              agenticItems = [
+                ...agenticItems.slice(0, lastToolIdx),
+                { kind: "tools", steps: group.steps.map(s => s.id === ev.id ? { ...s, result: ev.result, ok: ev.ok } : s) },
+                ...agenticItems.slice(lastToolIdx + 1),
+              ]
+            }
+            pushDisplay(agenticItems, true)
+
+          } else if (ev.type === "done") {
+            // Final response — close streaming content block or create one
+            const last = agenticItems[agenticItems.length - 1]
+            if (last?.kind === "content" && last.streaming) {
+              agenticItems = [...agenticItems.slice(0, -1), { kind: "content", text: ev.text, streaming: false }]
+            } else if (ev.text) {
+              agenticItems = [...agenticItems, { kind: "content", text: ev.text, streaming: false }]
+            }
+            if (isMollama && ev.model) setRoutedModel(ev.model)
+            pushDisplay(agenticItems, false)
+
           } else if (ev.type === "error") {
-            finalContent = `⚠ ${ev.error}`
-            pushDisplay(false)
+            const errText = `⚠ ${ev.error}`
+            const last = agenticItems[agenticItems.length - 1]
+            if (last?.kind === "content" && last.streaming) {
+              agenticItems = [...agenticItems.slice(0, -1), { kind: "content", text: errText, streaming: false }]
+            } else {
+              agenticItems = [...agenticItems, { kind: "content", text: errText, streaming: false }]
+            }
+            pushDisplay(agenticItems, false)
           }
         }
 
-        // Save to session history
-        if (finalContent) {
+        // Compose final text from all content blocks for session history
+        const finalItems: AgenticItem[] = agenticItems.map(i =>
+          i.kind === "content" ? { ...i, streaming: false } : i
+        )
+        const finalContent = finalItems
+          .filter(i => i.kind === "content")
+          .map(i => (i as AgenticContentBlock).text)
+          .filter(Boolean)
+          .join("\n\n")
+
+        // Save display + messages to session (updateSession inside setDisplay to get latest prev)
+        setDisplay(prev => {
+          const finalDisplay: DisplayMsg[] = prev.map(d =>
+            d.kind === "agentic" && d.streaming
+              ? { kind: "agentic", items: finalItems, streaming: false }
+              : d
+          )
           updateSession(activeId, s => ({
             ...s,
-            messages: [...newMessages, { role: "assistant" as const, content: finalContent }],
+            messages: finalContent ? [...newMessages, { role: "assistant" as const, content: finalContent }] : newMessages,
+            displays: finalDisplay,
           }))
-        }
-        // Ensure streaming is stopped
-        pushDisplay(false)
+          return finalDisplay
+        })
+
       } catch (err: any) {
-        if (err.name !== "AbortError") {
-          setDisplay(prev => {
-            const next = [...prev]
-            const idx = next.findLastIndex(d => d.kind === "agentic")
-            if (idx >= 0) next[idx] = { ...(next[idx] as any), finalContent: `Error: ${err.message}`, streaming: false }
-            return next
-          })
-        } else {
-          setDisplay(prev => {
-            const next = [...prev]
-            const idx = next.findLastIndex(d => d.kind === "agentic")
-            if (idx >= 0) next[idx] = { ...(next[idx] as any), streaming: false }
-            return next
-          })
-        }
+        setDisplay(prev => {
+          const next = [...prev]
+          const idx = next.findLastIndex(d => d.kind === "agentic")
+          if (idx >= 0) {
+            const d = next[idx] as Extract<DisplayMsg, { kind: "agentic" }>
+            if (err.name !== "AbortError") {
+              const errItem: AgenticContentBlock = { kind: "content", text: `Error: ${err.message}`, streaming: false }
+              next[idx] = { ...d, items: [...d.items, errItem], streaming: false }
+            } else {
+              next[idx] = { ...d, streaming: false }
+            }
+          }
+          return next
+        })
       }
     } else {
       // Normal streaming mode

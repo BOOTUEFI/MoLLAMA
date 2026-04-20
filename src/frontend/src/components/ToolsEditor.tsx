@@ -365,7 +365,7 @@ function AiGenerateDialog({ onClose, onCreated }: {
                 <DropdownMenuContent
                   align="start"
                   sideOffset={4}
-                  className="min-w-[180px] max-h-[220px] overflow-y-auto rounded-xl border border-white/[0.07] bg-[#0d0d1c]/98 backdrop-blur-2xl shadow-2xl shadow-black/50 p-1.5"
+                  className="min-w-[180px] max-h-[220px] overflow-y-auto rounded-xl border border-white/[0.07] bg-[#0d0d1c]/98 backdrop-blur-2xl shadow-2xl shadow-black/50 p-1.5 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-border/25 [&::-webkit-scrollbar-thumb]:rounded-full"
                 >
                   <DropdownMenuRadioGroup value={model} onValueChange={setModel}>
                     {models.map(m => (

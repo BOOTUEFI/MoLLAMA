@@ -399,7 +399,7 @@ export function SettingsPanel({ selectedModel, onModelChange, onClose }: Props) 
             ))}
           </TabsList>
 
-          <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+          <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-border/25 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb:hover]:bg-border/50">
 
             {/* ─── Overview ─── */}
             <TabsContent value="overview" className="mt-0 space-y-3">

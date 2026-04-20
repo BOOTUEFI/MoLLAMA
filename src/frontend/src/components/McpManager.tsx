@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
   Plug, Plus, Trash2, RefreshCcw, Loader2, CheckCircle2,
@@ -364,20 +364,26 @@ export function InferenceSettings() {
   const { mutateAsync: save, isPending } = useSaveAppSettings()
 
   const compression = settings?.context_compression ?? true
-  const threshold = settings?.compression_threshold ?? 70
+  const serverThreshold = settings?.compression_threshold ?? 70
+
+  // Local slider state — prevents glitching from server round-trips while dragging
+  const [localThreshold, setLocalThreshold] = useState(serverThreshold)
+
+  // Sync local state when server value changes (e.g. after a successful save)
+  useEffect(() => { setLocalThreshold(serverThreshold) }, [serverThreshold])
 
   const toggle = async () => {
     try {
-      await save({ context_compression: !compression })
+      await save({ ...(settings ?? {}), context_compression: !compression })
       toast.success(compression ? "Auto-compact disabled" : "Auto-compact enabled")
     } catch (e: any) {
       toast.error(e.message)
     }
   }
 
-  const setThreshold = async (v: number) => {
+  const commitThreshold = async (v: number) => {
     try {
-      await save({ compression_threshold: v })
+      await save({ ...(settings ?? {}), compression_threshold: v })
     } catch (e: any) {
       toast.error(e.message)
     }
@@ -405,17 +411,19 @@ export function InferenceSettings() {
         </div>
       </div>
 
-      {/* Threshold slider */}
+      {/* Threshold slider — local state while dragging, saves on release */}
       {compression && (
         <div className="px-3 py-2 rounded-xl border border-border/15 bg-background/20 space-y-1.5">
           <div className="flex items-center justify-between">
             <span className="text-[9px] font-mono text-muted-foreground/50">Compact threshold</span>
-            <span className="text-[9px] font-mono text-primary/70 tabular-nums">{threshold}%</span>
+            <span className="text-[9px] font-mono text-primary/70 tabular-nums">{localThreshold}%</span>
           </div>
           <input
             type="range" min={40} max={95} step={5}
-            value={threshold}
-            onChange={e => setThreshold(Number(e.target.value))}
+            value={localThreshold}
+            onChange={e => setLocalThreshold(Number(e.target.value))}
+            onMouseUp={e => commitThreshold(Number((e.target as HTMLInputElement).value))}
+            onTouchEnd={e => commitThreshold(localThreshold)}
             className="w-full h-1 accent-primary cursor-pointer"
           />
           <div className="flex justify-between text-[7.5px] font-mono text-muted-foreground/25">
