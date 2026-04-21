@@ -487,6 +487,14 @@ export const disconnectMcpServer = async (name: string): Promise<{ ok: boolean }
 export interface AppSettings {
   context_compression?: boolean
   compression_threshold?: number
+  max_tool_loops?: number
+  orchestrator_enabled?: boolean
+  orchestrator_models?: {
+    qwen35?: boolean
+    deepseek?: boolean
+    minimax?: boolean
+    gemma4?: boolean
+  }
 }
 
 export const fetchAppSettings = async (): Promise<AppSettings> => {
@@ -617,4 +625,343 @@ export const uploadToolFile = async (file: File): Promise<{ ok: boolean; path: s
     throw new Error(err.detail || "Upload failed")
   }
   return response.json()
+}
+
+// ── Skills ────────────────────────────────────────────────────────────────────
+
+export interface Skill {
+  name: string
+  description?: string
+  system_prompt?: string
+  instructions?: string
+  model?: string
+}
+
+export const fetchSkills = async (): Promise<Skill[]> => {
+  const r = await fetch(`${API_BASE_URL}/admin/skills`)
+  if (!r.ok) throw new Error("Failed to fetch skills")
+  const d = await r.json()
+  return d.skills ?? []
+}
+
+export const getSkill = async (name: string): Promise<Skill> => {
+  const r = await fetch(`${API_BASE_URL}/admin/skills/${encodeURIComponent(name)}`)
+  if (!r.ok) throw new Error("Skill not found")
+  return r.json()
+}
+
+export const saveSkill = async (name: string, data: Partial<Skill>): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/skills/${encodeURIComponent(name)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  })
+  if (!r.ok) throw new Error("Failed to save skill")
+  return r.json()
+}
+
+export const deleteSkill = async (name: string): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/skills/${encodeURIComponent(name)}`, { method: "DELETE" })
+  if (!r.ok) throw new Error("Failed to delete skill")
+  return r.json()
+}
+
+export const invokeSkill = async (name: string, context: string, model?: string): Promise<{ result: string; model: string }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/skills/${encodeURIComponent(name)}/invoke`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ context, ...(model ? { model } : {}) }),
+  })
+  if (!r.ok) throw new Error("Failed to invoke skill")
+  return r.json()
+}
+
+// ── Routines ──────────────────────────────────────────────────────────────────
+
+export interface Routine {
+  name: string
+  prompt?: string
+  interval_minutes?: number
+  model?: string
+  enabled?: boolean
+  last_run?: number | null
+}
+
+export const fetchRoutines = async (): Promise<Routine[]> => {
+  const r = await fetch(`${API_BASE_URL}/admin/routines`)
+  if (!r.ok) throw new Error("Failed to fetch routines")
+  const d = await r.json()
+  return d.routines ?? []
+}
+
+export const getRoutine = async (name: string): Promise<Routine> => {
+  const r = await fetch(`${API_BASE_URL}/admin/routines/${encodeURIComponent(name)}`)
+  if (!r.ok) throw new Error("Routine not found")
+  return r.json()
+}
+
+export const saveRoutine = async (name: string, data: Partial<Routine>): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/routines/${encodeURIComponent(name)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  })
+  if (!r.ok) throw new Error("Failed to save routine")
+  return r.json()
+}
+
+export const deleteRoutine = async (name: string): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/routines/${encodeURIComponent(name)}`, { method: "DELETE" })
+  if (!r.ok) throw new Error("Failed to delete routine")
+  return r.json()
+}
+
+export const toggleRoutine = async (name: string): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/routines/${encodeURIComponent(name)}/toggle`, { method: "POST" })
+  if (!r.ok) throw new Error("Failed to toggle routine")
+  return r.json()
+}
+
+export const runRoutine = async (name: string): Promise<{ ok: boolean; result?: string; error?: string; model?: string }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/routines/${encodeURIComponent(name)}/run`, { method: "POST" })
+  if (!r.ok) throw new Error("Failed to run routine")
+  return r.json()
+}
+
+// ── Agents ────────────────────────────────────────────────────────────────────
+
+export interface Agent {
+  name: string
+  description?: string
+  system_prompt?: string
+  model?: string
+  enabled?: boolean
+}
+
+export const fetchAgents = async (): Promise<Agent[]> => {
+  const r = await fetch(`${API_BASE_URL}/admin/agents`)
+  if (!r.ok) throw new Error("Failed to fetch agents")
+  const d = await r.json()
+  return d.agents ?? []
+}
+
+export const getAgent = async (name: string): Promise<Agent> => {
+  const r = await fetch(`${API_BASE_URL}/admin/agents/${encodeURIComponent(name)}`)
+  if (!r.ok) throw new Error("Agent not found")
+  return r.json()
+}
+
+export const saveAgent = async (name: string, data: Partial<Agent>): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/agents/${encodeURIComponent(name)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  })
+  if (!r.ok) throw new Error("Failed to save agent")
+  return r.json()
+}
+
+export const deleteAgent = async (name: string): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/agents/${encodeURIComponent(name)}`, { method: "DELETE" })
+  if (!r.ok) throw new Error("Failed to delete agent")
+  return r.json()
+}
+
+export async function* runAgent(name: string, task: string, model?: string): AsyncGenerator<{ type: string; text?: string; error?: string }> {
+  const r = await fetch(`${API_BASE_URL}/admin/agents/${encodeURIComponent(name)}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task, ...(model ? { model } : {}) }),
+  })
+  if (!r.ok || !r.body) throw new Error("Failed to run agent")
+  const reader = r.body.getReader()
+  const dec = new TextDecoder()
+  let buf = ""
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    const lines = buf.split("\n"); buf = lines.pop() || ""
+    for (const line of lines) {
+      if (!line.trim()) continue
+      try { yield JSON.parse(line) } catch {}
+    }
+  }
+}
+
+// ── War Room ──────────────────────────────────────────────────────────────────
+
+export type WarRoomEvent =
+  | { type: "agent_start"; agent: string }
+  | { type: "delta"; agent: string; text: string }
+  | { type: "agent_done"; agent: string; text: string }
+  | { type: "done" }
+  | { type: "error"; error: string }
+
+export async function* runWarRoom(question: string, agentNames?: string[]): AsyncGenerator<WarRoomEvent> {
+  const r = await fetch(`${API_BASE_URL}/admin/warroom`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question, ...(agentNames ? { agents: agentNames } : {}) }),
+  })
+  if (!r.ok || !r.body) throw new Error("War Room request failed")
+  const reader = r.body.getReader()
+  const dec = new TextDecoder()
+  let buf = ""
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    const lines = buf.split("\n"); buf = lines.pop() || ""
+    for (const line of lines) {
+      if (!line.trim()) continue
+      try { yield JSON.parse(line) as WarRoomEvent } catch {}
+    }
+  }
+}
+
+// ── Projects ──────────────────────────────────────────────────────────────────
+
+export interface Project {
+  id: string
+  name: string
+  description?: string
+  created_at: number
+  updated_at?: number
+  messages?: ChatMessage[]
+  knowledge?: string[]
+}
+
+export const fetchProjects = async (): Promise<Project[]> => {
+  const r = await fetch(`${API_BASE_URL}/admin/projects`)
+  if (!r.ok) throw new Error("Failed to fetch projects")
+  const d = await r.json()
+  return d.projects ?? []
+}
+
+export const saveProject = async (project_id: string, data: Partial<Project>): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/projects/${encodeURIComponent(project_id)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  })
+  if (!r.ok) throw new Error("Failed to save project")
+  return r.json()
+}
+
+export const deleteProject = async (project_id: string): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/projects/${encodeURIComponent(project_id)}`, { method: "DELETE" })
+  if (!r.ok) throw new Error("Failed to delete project")
+  return r.json()
+}
+
+export interface ProjectFileEntry {
+  path: string
+  type: "file" | "dir"
+  size?: number
+  children?: ProjectFileEntry[]
+}
+
+export const fetchProjectFiles = async (project_id: string): Promise<ProjectFileEntry[]> => {
+  const r = await fetch(`${API_BASE_URL}/admin/projects/${encodeURIComponent(project_id)}/files`)
+  if (!r.ok) throw new Error("Failed to fetch project files")
+  const d = await r.json()
+  return d.files ?? []
+}
+
+export const readProjectFile = async (project_id: string, path: string): Promise<string> => {
+  const r = await fetch(`${API_BASE_URL}/admin/projects/${encodeURIComponent(project_id)}/files/read?path=${encodeURIComponent(path)}`)
+  if (!r.ok) throw new Error("Failed to read file")
+  const d = await r.json()
+  return d.code ?? ""
+}
+
+export const writeProjectFile = async (project_id: string, path: string, code: string): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/projects/${encodeURIComponent(project_id)}/files`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, code }),
+  })
+  if (!r.ok) throw new Error("Failed to write file")
+  return r.json()
+}
+
+export const deleteProjectFile = async (project_id: string, path: string): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/projects/${encodeURIComponent(project_id)}/files`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  })
+  if (!r.ok) throw new Error("Failed to delete file/folder")
+  return r.json()
+}
+
+export const mkdirProject = async (project_id: string, path: string): Promise<{ ok: boolean }> => {
+  const r = await fetch(`${API_BASE_URL}/admin/projects/${encodeURIComponent(project_id)}/files/mkdir`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  })
+  if (!r.ok) throw new Error("Failed to create folder")
+  return r.json()
+}
+
+export const uploadProjectFile = async (project_id: string, file: File, destPath?: string): Promise<{ ok: boolean; path: string }> => {
+  const fd = new FormData()
+  fd.append("file", file)
+  if (destPath) fd.append("path", destPath)
+  const r = await fetch(`${API_BASE_URL}/admin/projects/${encodeURIComponent(project_id)}/files/upload`, {
+    method: "POST",
+    body: fd,
+  })
+  if (!r.ok) throw new Error("Upload failed")
+  return r.json()
+}
+
+// ── Terminal ──────────────────────────────────────────────────────────────────
+
+export async function* runTerminal(command: string): AsyncGenerator<{ type: string; text?: string; code?: number }> {
+  const r = await fetch(`${API_BASE_URL}/admin/terminal/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ command }),
+  })
+  if (!r.ok || !r.body) throw new Error("Terminal failed")
+  const reader = r.body.getReader()
+  const dec = new TextDecoder()
+  let buf = ""
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    const lines = buf.split("\n"); buf = lines.pop() || ""
+    for (const line of lines) {
+      if (!line.trim()) continue
+      try { yield JSON.parse(line) } catch {}
+    }
+  }
+}
+
+// ── Streaming tool generation ─────────────────────────────────────────────────
+
+export async function* generateToolStream(description: string, model: string): AsyncGenerator<{ type: string; text?: string; code?: string }> {
+  const r = await fetch(`${API_BASE_URL}/admin/tools/generate/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ description, model }),
+  })
+  if (!r.ok || !r.body) throw new Error("Generation failed")
+  const reader = r.body.getReader()
+  const dec = new TextDecoder()
+  let buf = ""
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    const lines = buf.split("\n"); buf = lines.pop() || ""
+    for (const line of lines) {
+      if (!line.trim()) continue
+      try { yield JSON.parse(line) } catch {}
+    }
+  }
 }

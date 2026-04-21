@@ -37,6 +37,7 @@ class ToolRegistry:
         self.tools: Dict[str, Callable] = {}
         self.schemas: List[dict] = []
         self._extra_schemas: List[dict] = []  # MCP / external tool schemas
+        self._builtin_schemas: List[dict] = []  # soul, subagent built-ins
         self.load_tools()
 
     # ── Module loading ─────────────────────────────────────────────────────────
@@ -88,7 +89,7 @@ class ToolRegistry:
                         new_tools[fname] = func
 
         self.tools = new_tools
-        self.schemas = new_schemas + self._extra_schemas
+        self.schemas = new_schemas + self._builtin_schemas + self._extra_schemas
 
     def hot_reload(self) -> int:
         """Reload all tool modules from disk. Returns number of loaded tools."""
@@ -101,7 +102,13 @@ class ToolRegistry:
         """Replace MCP/external schemas and rebuild the full schema list."""
         self._extra_schemas = list(schemas)
         local = [get_function_schema(f) for f in self.tools.values()]
-        self.schemas = local + self._extra_schemas
+        self.schemas = local + self._builtin_schemas + self._extra_schemas
+
+    def set_builtin_schemas(self, schemas: List[dict]) -> None:
+        """Register built-in tool schemas (soul, subagents) and rebuild schema list."""
+        self._builtin_schemas = list(schemas)
+        local = [get_function_schema(f) for f in self.tools.values()]
+        self.schemas = local + self._builtin_schemas + self._extra_schemas
 
     # ── Execution ──────────────────────────────────────────────────────────────
 
@@ -135,6 +142,16 @@ class ToolRegistry:
         if name.startswith("mcp__"):
             from mcp_manager import mcp_manager
             return await mcp_manager.execute_tool(name, args)
+
+        # Built-in soul tools
+        if name in ("add_to_memory", "read_memory"):
+            import soul
+            return await soul.execute(name, args)
+
+        # Built-in subagent tools
+        if name == "spawn_subagent":
+            import subagents as _subagents
+            return await _subagents.execute(name, args)
 
         if name in self.tools:
             result = self.tools[name](**args)

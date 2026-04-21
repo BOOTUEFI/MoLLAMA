@@ -188,9 +188,10 @@ export const useModelContextLength = (model: string) =>
   useQuery({
     queryKey: ["modelContextLength", model],
     queryFn: () => fetchModelContextLength(model),
-    enabled: !!model && model !== "mollama",
+    enabled: !!model,
     staleTime: 5 * 60 * 1000, // 5 min — model context doesn't change
-    placeholderData: 8192,
+    // mollama routes dynamically — treat as large context window; real models return their own value
+    placeholderData: model === "mollama" ? 131072 : 8192,
   })
 
 export const useTools = () => {

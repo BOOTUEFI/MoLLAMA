@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
   Plug, Plus, Trash2, RefreshCcw, Loader2, CheckCircle2,
@@ -368,9 +368,16 @@ export function InferenceSettings() {
 
   // Local slider state — prevents glitching from server round-trips while dragging
   const [localThreshold, setLocalThreshold] = useState(serverThreshold)
+  // Suppress WS sync after save to prevent revert when WS cache is stale
+  const suppressSyncRef = useRef(false)
+  const suppressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Sync local state when server value changes (e.g. after a successful save)
-  useEffect(() => { setLocalThreshold(serverThreshold) }, [serverThreshold])
+  // Sync local state when server value changes, unless we just saved (suppress window)
+  useEffect(() => {
+    if (!suppressSyncRef.current) {
+      setLocalThreshold(serverThreshold)
+    }
+  }, [serverThreshold])
 
   const toggle = async () => {
     try {
@@ -382,9 +389,14 @@ export function InferenceSettings() {
   }
 
   const commitThreshold = async (v: number) => {
+    // Suppress syncing from server for 6s so a stale WS broadcast can't revert the slider
+    suppressSyncRef.current = true
+    if (suppressTimerRef.current) clearTimeout(suppressTimerRef.current)
+    suppressTimerRef.current = setTimeout(() => { suppressSyncRef.current = false }, 6000)
     try {
       await save({ ...(settings ?? {}), compression_threshold: v })
     } catch (e: any) {
+      suppressSyncRef.current = false
       toast.error(e.message)
     }
   }
@@ -431,6 +443,127 @@ export function InferenceSettings() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── OrchestratorSettings ─────────────────────────────────────────────────────
+
+const ORCH_MODELS: { key: "qwen35" | "deepseek" | "minimax" | "gemma4"; label: string; tier: string; desc: string }[] = [
+  { key: "qwen35",   label: "Qwen 3.5",        tier: "T1", desc: "General coding & frontend" },
+  { key: "deepseek", label: "DeepSeek-V3",      tier: "T2", desc: "Complex logic & debugging" },
+  { key: "minimax",  label: "MiniMax-M2.7",     tier: "T3", desc: "High context (>48k)" },
+  { key: "gemma4",   label: "Gemma4 31b",       tier: "T4", desc: "Prose & documentation" },
+]
+
+export function OrchestratorSettings() {
+  const { data: settings } = useAppSettings()
+  const { mutateAsync: save, isPending } = useSaveAppSettings()
+
+  // Optimistic local state to prevent flash on toggle
+  const suppressRef = useRef(false)
+  const [localEnabled, setLocalEnabled] = useState<boolean | null>(null)
+  const [localModels, setLocalModels] = useState<Record<string, boolean> | null>(null)
+
+  useEffect(() => {
+    if (!suppressRef.current) {
+      setLocalEnabled(settings?.orchestrator_enabled ?? false)
+      setLocalModels(settings?.orchestrator_models ?? {})
+    }
+  }, [settings?.orchestrator_enabled, settings?.orchestrator_models])
+
+  const enabled = localEnabled ?? (settings?.orchestrator_enabled ?? false)
+  const models = localModels ?? (settings?.orchestrator_models ?? {})
+
+  const toggleEnabled = useCallback(async () => {
+    const next = !enabled
+    setLocalEnabled(next)
+    suppressRef.current = true
+    setTimeout(() => { suppressRef.current = false }, 4000)
+    try {
+      await save({ ...(settings ?? {}), orchestrator_enabled: next })
+      toast.success(next ? "Orchestrator enabled" : "Orchestrator disabled")
+    } catch (e: any) {
+      setLocalEnabled(!next)
+      suppressRef.current = false
+      toast.error(e.message)
+    }
+  }, [enabled, settings, save])
+
+  const toggleModel = useCallback(async (key: "qwen35" | "deepseek" | "minimax" | "gemma4") => {
+    const cur = models[key] ?? true
+    const next = { ...models, [key]: !cur }
+    setLocalModels(next)
+    suppressRef.current = true
+    setTimeout(() => { suppressRef.current = false }, 4000)
+    try {
+      await save({ ...(settings ?? {}), orchestrator_models: next })
+    } catch (e: any) {
+      setLocalModels(models)
+      suppressRef.current = false
+      toast.error(e.message)
+    }
+  }, [models, settings, save])
+
+  return (
+    <div className="space-y-2">
+      {/* Master toggle */}
+      <div
+        onClick={toggleEnabled}
+        className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl border border-border/15 bg-background/20 cursor-pointer hover:bg-background/30 transition-colors"
+      >
+        <div>
+          <div className="text-[10.5px] font-mono font-semibold text-foreground/80">Orchestrator</div>
+          <div className="text-[8.5px] font-mono text-muted-foreground/35 mt-0.5 leading-relaxed">
+            Route tasks to specialist models by intensity
+          </div>
+        </div>
+        <div className={["w-9 h-5 rounded-full transition-colors relative shrink-0", enabled ? "bg-primary" : "bg-muted", isPending ? "opacity-50" : ""].join(" ")}>
+          <motion.div
+            animate={{ x: enabled ? 18 : 2 }}
+            transition={{ type: "spring", damping: 20, stiffness: 300 }}
+            className="absolute top-1 w-3.5 h-3.5 rounded-full bg-white shadow"
+          />
+        </div>
+      </div>
+
+      {/* Per-model toggles */}
+      <AnimatePresence>
+        {enabled && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="space-y-1 px-1">
+              {ORCH_MODELS.map(m => {
+                const on = models[m.key] ?? true
+                return (
+                  <div
+                    key={m.key}
+                    onClick={() => toggleModel(m.key)}
+                    className="flex items-center justify-between gap-3 px-3 py-2 rounded-xl border border-border/10 bg-background/10 cursor-pointer hover:bg-background/20 transition-colors"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-[8px] font-mono font-bold text-primary/60 w-5">{m.tier}</span>
+                      <div>
+                        <div className="text-[10px] font-mono text-foreground/70">{m.label}</div>
+                        <div className="text-[8px] font-mono text-muted-foreground/30">{m.desc}</div>
+                      </div>
+                    </div>
+                    <div className={["w-7 h-4 rounded-full transition-colors relative shrink-0", on ? "bg-primary/70" : "bg-muted/60"].join(" ")}>
+                      <motion.div
+                        animate={{ x: on ? 14 : 1 }}
+                        transition={{ type: "spring", damping: 20, stiffness: 300 }}
+                        className="absolute top-[3px] w-2.5 h-2.5 rounded-full bg-white shadow"
+                      />
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

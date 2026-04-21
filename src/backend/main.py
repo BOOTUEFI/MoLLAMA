@@ -21,6 +21,10 @@ from middleware import OllamaProxyMiddleware
 from ws_manager import ws_manager
 from mcp_manager import mcp_manager
 from tools import registry
+import soul
+import skills as _skills
+import routines as _routines
+import subagents as _subagents
 
 import httpx
 
@@ -174,9 +178,15 @@ async def lifespan(app: FastAPI):
     app.state._bg_tasks = set()
     # Autoconnect MCP servers
     asyncio.create_task(mcp_manager.autoconnect())
+    # Register built-in soul + subagent tools
+    registry.set_builtin_schemas(soul.TOOL_SCHEMAS + _subagents.TOOL_SCHEMAS)
+    # Start routine scheduler
+    asyncio.create_task(_routines.scheduler_loop())
     try:
         yield
     finally:
+        # Signal core to stop dispatching new threads before we tear down the executor
+        core.mark_shutting_down()
         bg_tasks = list(getattr(app.state, "_bg_tasks", set()))
         for t in bg_tasks:
             t.cancel()
@@ -409,6 +419,8 @@ async def get_model_context_length(model: str = "") -> dict:
     """Return the context window size for a given model from the first active Ollama instance."""
     if not model:
         return {"context_length": 4096}
+    if model == "mollama":
+        return {"context_length": 131072}  # mollama routes dynamically — report large context
     active = core.get_active_instances()
     if not active:
         return {"context_length": 4096}
@@ -527,8 +539,14 @@ def get_processing() -> dict:
 
 @app.get("/admin/stats")
 async def get_stats() -> dict:
-    current_version = await core.get_current_ollama_version()
-    latest_version = await core.get_latest_ollama_version()
+    try:
+        current_version = await core.get_current_ollama_version()
+    except Exception:
+        current_version = None
+    try:
+        latest_version = await core.get_latest_ollama_version()
+    except Exception:
+        latest_version = None
     maintenance = core.get_maintenance_state()
 
     return {
@@ -750,6 +768,79 @@ async def generate_tool(body: dict) -> dict:
     return {"code": content.strip(), "model": model}
 
 
+@app.post("/admin/tools/generate/stream")
+async def generate_tool_stream(body: dict):
+    import re as _re
+    description = body.get("description", "").strip()
+    model = body.get("model", "")
+    if not description:
+        raise HTTPException(status_code=400, detail="missing description")
+
+    data = core.load_data()
+    active = [(n, i) for n, i in data.items() if i.get("active") and i.get("base_url")]
+    if not active:
+        raise HTTPException(status_code=503, detail="no active Ollama instances")
+
+    _, inst = active[0]
+    url = inst["base_url"].rstrip("/")
+
+    if not model:
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.get(f"{url}/api/tags")
+                tags = r.json().get("models", [])
+                model = tags[0]["name"] if tags else "llama3.2"
+        except Exception:
+            model = "llama3.2"
+
+    system_prompt = (
+        "You are a Python tool generator for an AI assistant system.\n"
+        "Generate a single Python file with one or more utility functions.\n\n"
+        "Rules:\n"
+        "- Each function needs a clear one-line docstring (shown to the LLM)\n"
+        "- Use type annotations for all parameters and return values\n"
+        "- Return str or JSON-serializable data\n"
+        "- Only use Python stdlib unless a dep is truly essential\n"
+        "- No class definitions — only module-level functions\n"
+        "- Output ONLY raw Python code, no markdown fences"
+    )
+
+    async def stream_gen():
+        accumulated = ""
+        async with httpx.AsyncClient(timeout=120) as client:
+            async with client.stream("POST", f"{url}/api/chat", json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Create a Python tool file that: {description}"},
+                ],
+                "stream": True,
+                "options": {"temperature": 0.25},
+            }) as resp:
+                async for raw_line in resp.aiter_lines():
+                    if not raw_line.strip():
+                        continue
+                    try:
+                        chunk = json.loads(raw_line)
+                        text = chunk.get("message", {}).get("content", "") or ""
+                        if text:
+                            accumulated += text
+                            yield json.dumps({"type": "delta", "text": text}) + "\n"
+                        if chunk.get("done"):
+                            break
+                    except Exception:
+                        continue
+        clean = _re.sub(r"^```(?:python)?\n?", "", accumulated.strip(), flags=_re.MULTILINE)
+        clean = _re.sub(r"\n?```\s*$", "", clean.strip(), flags=_re.MULTILINE)
+        yield json.dumps({"type": "done", "code": clean.strip(), "model": model}) + "\n"
+
+    return StreamingResponse(
+        stream_gen(),
+        media_type="application/x-ndjson",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
+
+
 # ── Agentic chat ──────────────────────────────────────────────────────────────
 
 @app.post("/admin/chat/agentic")
@@ -790,8 +881,11 @@ async def agentic_chat(request: Request):
 
             routed_model = model  # track the actual model used (for mollama routing)
 
+            settings = _load_settings()
+            max_tool_loops = int(settings.get("max_tool_loops", 50))
+
             async with httpx.AsyncClient(timeout=None) as client:
-              for _loop in range(8):
+              for _loop in range(max_tool_loops):
 
                 # ── Stream upstream and relay deltas live; buffer tool_calls ──
                 accumulated_content = ""
@@ -905,7 +999,7 @@ async def agentic_chat(request: Request):
                     yield json.dumps({"type": "tool_result", "id": tc_id, "name": tc_name, "result": result_str, "ok": ok}) + "\n"
                     current_messages.append({"role": "tool", "tool_call_id": tc_id, "name": tc_name, "content": result_str})
 
-            yield json.dumps({"type": "error", "error": "Max tool iterations reached"}) + "\n"
+            yield json.dumps({"type": "error", "error": f"Max tool iterations reached ({max_tool_loops}). Increase via Settings → max_tool_loops."}) + "\n"
         except Exception as e:
             yield json.dumps({"type": "error", "error": f"Internal error: {e}"}) + "\n"
 
@@ -1025,15 +1119,452 @@ def save_settings(body: dict) -> dict:
     return {"ok": True, "settings": current}
 
 
+# ── SOUL.MD Memory ────────────────────────────────────────────────────────────
+
+@app.get("/admin/soul")
+def get_soul() -> dict:
+    return {"content": soul.get_memory()}
+
+
+@app.post("/admin/soul")
+def save_soul(body: dict) -> dict:
+    content = body.get("content", "")
+    soul.set_memory(content)
+    return {"ok": True}
+
+
+@app.post("/admin/soul/add")
+def soul_add(body: dict) -> dict:
+    entry = body.get("entry", "").strip()
+    section = body.get("section", "General")
+    if not entry:
+        raise HTTPException(status_code=400, detail="missing entry")
+    result = soul.add_to_memory(entry, section)
+    return {"ok": True, "result": result}
+
+
+# ── Skills ────────────────────────────────────────────────────────────────────
+
+@app.get("/admin/skills")
+def list_skills() -> dict:
+    return {"skills": _skills.list_skills()}
+
+
+@app.get("/admin/skills/{name}")
+def get_skill(name: str) -> dict:
+    s = _skills.get_skill(name)
+    if s is None:
+        raise HTTPException(status_code=404, detail="skill not found")
+    return s
+
+
+@app.post("/admin/skills")
+def save_skill(body: dict) -> dict:
+    name = body.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="missing name")
+    _skills.save_skill(name, body)
+    return {"ok": True}
+
+
+@app.post("/admin/skills/{name}")
+def save_skill_by_name(name: str, body: dict) -> dict:
+    body["name"] = name
+    _skills.save_skill(name, body)
+    return {"ok": True}
+
+
+@app.delete("/admin/skills/{name}")
+def delete_skill(name: str) -> dict:
+    _skills.delete_skill(name)
+    return {"ok": True}
+
+
+@app.post("/admin/skills/{name}/invoke")
+async def invoke_skill(name: str, request: Request) -> dict:
+    body_json = await request.json()
+    context = body_json.get("context", "")
+    model = body_json.get("model", "")
+    result = await _skills.invoke_skill(name, context, model)
+    return result
+
+
+# ── Routines ──────────────────────────────────────────────────────────────────
+
+@app.get("/admin/routines")
+def list_routines() -> dict:
+    return {"routines": _routines.list_routines()}
+
+
+@app.post("/admin/routines")
+def save_routine(body: dict) -> dict:
+    name = body.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="missing name")
+    _routines.save_routine(name, body)
+    return {"ok": True}
+
+
+@app.post("/admin/routines/{name}")
+def save_routine_by_name(name: str, body: dict) -> dict:
+    body["name"] = name
+    _routines.save_routine(name, body)
+    return {"ok": True}
+
+
+@app.get("/admin/routines/{name}")
+def get_routine(name: str) -> dict:
+    r = _routines.get_routine(name)
+    if r is None:
+        raise HTTPException(status_code=404, detail="routine not found")
+    return r
+
+
+@app.delete("/admin/routines/{name}")
+def delete_routine(name: str) -> dict:
+    _routines.delete_routine(name)
+    return {"ok": True}
+
+
+@app.post("/admin/routines/{name}/run")
+async def run_routine(name: str) -> dict:
+    result = await _routines.run_routine(name)
+    return result
+
+
+@app.post("/admin/routines/{name}/toggle")
+def toggle_routine(name: str) -> dict:
+    _routines.toggle_routine(name)
+    return {"ok": True}
+
+
+# ── Subagents ──────────────────────────────────────────────────────────────────
+
+@app.get("/admin/agents")
+def list_agents() -> dict:
+    return {"agents": _subagents.list_agents()}
+
+
+@app.post("/admin/agents")
+def save_agent(body: dict) -> dict:
+    name = body.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="missing name")
+    _subagents.save_agent(name, body)
+    return {"ok": True}
+
+
+@app.post("/admin/agents/{name}")
+def save_agent_by_name(name: str, body: dict) -> dict:
+    body["name"] = name
+    _subagents.save_agent(name, body)
+    return {"ok": True}
+
+
+@app.get("/admin/agents/{name}")
+def get_agent_by_name(name: str) -> dict:
+    a = _subagents.get_agent(name)
+    if a is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    return a
+
+
+@app.delete("/admin/agents/{name}")
+def delete_agent(name: str) -> dict:
+    _subagents.delete_agent(name)
+    return {"ok": True}
+
+
+@app.post("/admin/agents/{name}/run")
+async def run_agent_task(name: str, request: Request) -> Any:
+    body_json = await request.json()
+    task = body_json.get("task", "")
+    model = body_json.get("model", "")
+    result = await _subagents.run_agent(name, task, model)
+    return StreamingResponse(result, media_type="application/x-ndjson")
+
+
+# ── War Room ──────────────────────────────────────────────────────────────────
+
+@app.post("/admin/warroom")
+async def war_room(request: Request):
+    """Stream a multi-agent consensus debate."""
+    body_json = await request.json()
+    question = body_json.get("question", "").strip()
+    agent_names = body_json.get("agents", [])
+    model = body_json.get("model", "")
+    if not question:
+        raise HTTPException(status_code=400, detail="missing question")
+
+    async def debate_stream():
+        agents = agent_names if agent_names else _subagents.list_agent_names()
+        if not agents:
+            yield json.dumps({"type": "error", "error": "No agents configured. Add agents in the Agents panel first."}) + "\n"
+            return
+
+        active = core.get_active_instances()
+        if not active:
+            yield json.dumps({"type": "error", "error": "No Ollama instances available"}) + "\n"
+            return
+        _, target_url = active[0]
+
+        # Resolve model
+        actual_model = model
+        if not actual_model or actual_model == "mollama":
+            all_models = await core.get_all_instance_models_cached()
+            flat = [m for mlist in all_models.values() for m in mlist]
+            actual_model = flat[0] if flat else "llama3.2"
+
+        sys_prompt = core.get_system_prompt()
+
+        for agent_name in agents:
+            agent = _subagents.get_agent(agent_name)
+            if not agent:
+                continue
+            agent_system = agent.get("system_prompt", f"You are {agent_name}, a specialist AI agent.")
+            if sys_prompt:
+                agent_system = sys_prompt + "\n\n" + agent_system
+
+            agent_model = agent.get("model") or actual_model
+            yield json.dumps({"type": "agent_start", "agent": agent_name}) + "\n"
+
+            try:
+                accumulated = ""
+                async with httpx.AsyncClient(timeout=120) as client:
+                    async with client.stream("POST", f"{target_url.rstrip('/')}/api/chat", json={
+                        "model": agent_model,
+                        "messages": [
+                            {"role": "system", "content": agent_system + "\n\nYou are participating in a War Room debate. Give your expert analysis and recommendation."},
+                            {"role": "user", "content": f"Question for debate:\n{question}"},
+                        ],
+                        "stream": True,
+                    }) as resp:
+                        async for raw_line in resp.aiter_lines():
+                            line = raw_line.strip()
+                            if not line:
+                                continue
+                            try:
+                                chunk = json.loads(line)
+                                text = chunk.get("message", {}).get("content", "") or ""
+                                if text:
+                                    accumulated += text
+                                    yield json.dumps({"type": "delta", "agent": agent_name, "text": text}) + "\n"
+                                if chunk.get("done"):
+                                    break
+                            except Exception:
+                                continue
+                yield json.dumps({"type": "agent_done", "agent": agent_name, "text": accumulated}) + "\n"
+            except Exception as e:
+                yield json.dumps({"type": "agent_error", "agent": agent_name, "error": str(e)}) + "\n"
+
+        yield json.dumps({"type": "done"}) + "\n"
+
+    return StreamingResponse(debate_stream(), media_type="application/x-ndjson")
+
+
+# ── Projects ──────────────────────────────────────────────────────────────────
+
+PROJECTS_FILE = Path("/data/projects.json")
+
+
+def _load_projects() -> dict:
+    if PROJECTS_FILE.exists():
+        try:
+            return json.loads(PROJECTS_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_projects(data: dict) -> None:
+    PROJECTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PROJECTS_FILE.write_text(json.dumps(data, indent=2))
+
+
+@app.get("/admin/projects")
+def list_projects() -> dict:
+    return {"projects": list(_load_projects().values())}
+
+
+@app.post("/admin/projects/{project_id}")
+def save_project(project_id: str, body: dict) -> dict:
+    data = _load_projects()
+    existing = data.get(project_id, {"id": project_id, "created_at": time.time()})
+    existing.update({k: v for k, v in body.items() if k not in ("id", "created_at")})
+    existing["updated_at"] = time.time()
+    data[project_id] = existing
+    _save_projects(data)
+    return {"ok": True}
+
+
+@app.delete("/admin/projects/{project_id}")
+def delete_project(project_id: str) -> dict:
+    data = _load_projects()
+    data.pop(project_id, None)
+    _save_projects(data)
+    # Also remove project files directory
+    import shutil
+    proj_dir = Path("/data/projects") / project_id
+    if proj_dir.exists():
+        shutil.rmtree(proj_dir, ignore_errors=True)
+    return {"ok": True}
+
+
+# ── Project file management ────────────────────────────────────────────────────
+
+PROJECTS_BASE = Path("/data/projects")
+
+
+def _project_dir(project_id: str) -> Path:
+    d = PROJECTS_BASE / project_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _safe_project_path(project_id: str, rel_path: str) -> Path:
+    """Resolve a relative path inside the project dir; raise 400 on escape."""
+    base = _project_dir(project_id)
+    full = (base / rel_path).resolve()
+    if not str(full).startswith(str(base.resolve())):
+        raise HTTPException(status_code=400, detail="Path escape not allowed")
+    return full
+
+
+def _list_project_files_rec(base: Path, rel: str = "") -> list[dict]:
+    entries = []
+    try:
+        items = sorted(base.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+    except PermissionError:
+        return []
+    for item in items:
+        rel_name = f"{rel}/{item.name}".lstrip("/") if rel else item.name
+        if item.is_dir():
+            entries.append({"path": rel_name, "type": "dir", "children": _list_project_files_rec(item, rel_name)})
+        else:
+            entries.append({"path": rel_name, "type": "file", "size": item.stat().st_size})
+    return entries
+
+
+@app.get("/admin/projects/{project_id}/files")
+def list_project_files(project_id: str) -> dict:
+    base = _project_dir(project_id)
+    return {"files": _list_project_files_rec(base)}
+
+
+@app.get("/admin/projects/{project_id}/files/read")
+def read_project_file(project_id: str, path: str) -> dict:
+    full = _safe_project_path(project_id, path)
+    if not full.exists() or not full.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        return {"code": full.read_text("utf-8", errors="replace")}
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+@app.post("/admin/projects/{project_id}/files")
+def write_project_file(project_id: str, body: dict) -> dict:
+    path = body.get("path", "").strip()
+    code = body.get("code", "")
+    if not path:
+        raise HTTPException(status_code=400, detail="missing path")
+    full = _safe_project_path(project_id, path)
+    full.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        full.write_text(code, encoding="utf-8")
+        return {"ok": True}
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+@app.delete("/admin/projects/{project_id}/files")
+def delete_project_file(project_id: str, body: dict) -> dict:
+    path = body.get("path", "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="missing path")
+    full = _safe_project_path(project_id, path)
+    if not full.exists():
+        raise HTTPException(status_code=404, detail="not found")
+    import shutil
+    if full.is_dir():
+        shutil.rmtree(full)
+    else:
+        full.unlink()
+    return {"ok": True}
+
+
+@app.post("/admin/projects/{project_id}/files/mkdir")
+def mkdir_project(project_id: str, body: dict) -> dict:
+    path = body.get("path", "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="missing path")
+    full = _safe_project_path(project_id, path)
+    full.mkdir(parents=True, exist_ok=True)
+    return {"ok": True}
+
+
+@app.post("/admin/projects/{project_id}/files/upload")
+async def upload_project_file(project_id: str, request: Request) -> dict:
+    form = await request.form()
+    file = form.get("file")
+    rel_path = str(form.get("path", ""))
+    if not file:
+        raise HTTPException(status_code=400, detail="missing file")
+    name = rel_path.strip() or file.filename or "upload"
+    full = _safe_project_path(project_id, name)
+    full.parent.mkdir(parents=True, exist_ok=True)
+    content = await file.read()
+    try:
+        full.write_bytes(content)
+        return {"ok": True, "path": name}
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+# ── Terminal (safe pip install) ────────────────────────────────────────────────
+
+import subprocess
+
+
+@app.post("/admin/terminal/run")
+async def terminal_run(body: dict) -> StreamingResponse:
+    command = body.get("command", "").strip()
+    if not command:
+        raise HTTPException(status_code=400, detail="command required")
+
+    # Only allow safe commands
+    allowed_prefixes = ("pip install", "pip3 install", "pip show", "pip list", "pip freeze")
+    if not any(command.startswith(p) for p in allowed_prefixes):
+        raise HTTPException(status_code=400, detail="Only pip commands are allowed")
+
+    async def stream():
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        assert proc.stdout
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            yield json.dumps({"type": "output", "text": line.decode("utf-8", errors="replace")}) + "\n"
+        await proc.wait()
+        yield json.dumps({"type": "done", "code": proc.returncode}) + "\n"
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
 # ── Middleware ────────────────────────────────────────────────────────────────
 
 app.add_middleware(OllamaProxyMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 if __name__ == "__main__":

@@ -135,7 +135,7 @@ async def _run_internal_tool_loop(
     headers: dict,
     base_body_json: dict,
     method: str,
-    max_loops: int = 3,
+    max_loops: int = 50,
 ):
     """Runs tool calls internally and returns the final response data."""
     working_body = json.loads(json.dumps(base_body_json))

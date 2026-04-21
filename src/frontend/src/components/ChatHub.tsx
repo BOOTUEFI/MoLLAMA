@@ -6,7 +6,7 @@ import {
   Send, MessageSquare, Loader2, ArrowDown, Brain, Zap,
   Square, Plus, ChevronDown, Wrench, CheckCircle2, AlertCircle,
   Trash2, History, Terminal, Scissors, Paperclip, ImagePlus,
-  Lightbulb, X as XIcon, FileText, Activity,
+  Lightbulb, X as XIcon, FileText, Activity, Copy, Check,
 } from "lucide-react"
 import { sendChatMessage, sendAgenticMessage, compactChatMessages, type ChatMessage } from "@/lib/api"
 import { useTools, useAppSettings, useModelContextLength } from "@/hooks/use-api"
@@ -229,28 +229,98 @@ function renderBlock(text: string, baseKey: number): React.ReactNode {
   return <div key={baseKey} className="space-y-1">{nodes}</div>
 }
 
+function CopyCodeButton({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    navigator.clipboard.writeText(code).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    }).catch(() => {})
+  }
+  return (
+    <button
+      onClick={copy}
+      className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-mono text-muted-foreground/40 hover:text-foreground hover:bg-white/[0.08] transition-colors"
+      title="Copy code"
+    >
+      {copied ? <Check size={9} className="text-emerald-400" /> : <Copy size={9} />}
+      {copied ? "Copied" : "Copy"}
+    </button>
+  )
+}
+
+function ThinkBlock({ content }: { content: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="my-2 rounded-lg border border-amber-500/15 bg-amber-500/4 overflow-hidden">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-amber-500/8 transition-colors"
+      >
+        <Lightbulb size={9} className="text-amber-400/60 shrink-0" />
+        <span className="text-[8.5px] font-mono uppercase tracking-widest text-amber-400/60 flex-1 text-left">Thinking</span>
+        {open
+          ? <ChevronDown size={9} className="text-amber-400/40" />
+          : <ChevronRight size={9} className="text-amber-400/40" />}
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="overflow-hidden"
+          >
+            <div className="px-3 pb-2.5 pt-1 text-[10px] font-mono text-amber-200/50 leading-relaxed whitespace-pre-wrap border-t border-amber-500/10">
+              {content}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
 function renderContent(text: string): React.ReactNode[] {
   const nodes: React.ReactNode[] = []
-  const codeBlockRe = /```(\w*)\n?([\s\S]*?)```/g
+  // Combined regex: think tags + code blocks
+  const blockRe = /<think>([\s\S]*?)<\/think>|```(\w*)\n?([\s\S]*?)```/g
   let last = 0; let match: RegExpExecArray | null; let idx = 0
 
-  while ((match = codeBlockRe.exec(text)) !== null) {
+  while ((match = blockRe.exec(text)) !== null) {
     if (match.index > last) {
       nodes.push(renderBlock(text.slice(last, match.index), idx++))
     }
-    const lang = match[1]
-    nodes.push(
-      <div key={`cb-${match.index}`} className="my-2 rounded-lg overflow-hidden border border-border/30 bg-black/30">
-        {lang && (
-          <div className="px-3 py-1 text-[9px] font-mono text-muted-foreground/40 uppercase tracking-widest border-b border-border/20 bg-black/20">{lang}</div>
-        )}
-        <pre className="p-3 text-[11px] font-mono text-foreground/80 overflow-x-auto leading-relaxed whitespace-pre">{match[2]}</pre>
-      </div>
-    )
+    if (match[0].startsWith("<think>")) {
+      // Think block
+      nodes.push(<ThinkBlock key={`think-${match.index}`} content={match[1]} />)
+    } else {
+      // Code block
+      const lang = match[2]
+      const code = match[3]
+      nodes.push(
+        <div key={`cb-${match.index}`} className="my-2 rounded-lg overflow-hidden border border-border/30 bg-black/30">
+          <div className="flex items-center justify-between px-3 py-1 border-b border-border/20 bg-black/20">
+            {lang
+              ? <span className="text-[9px] font-mono text-muted-foreground/40 uppercase tracking-widest">{lang}</span>
+              : <span />
+            }
+            <CopyCodeButton code={code} />
+          </div>
+          <pre className="p-3 text-[11px] font-mono text-foreground/80 overflow-x-auto leading-relaxed whitespace-pre">{code}</pre>
+        </div>
+      )
+    }
     last = match.index + match[0].length
   }
   if (last < text.length) nodes.push(renderBlock(text.slice(last), idx++))
   return nodes
+}
+
+// Also strip incomplete opening think tags while streaming
+function stripStreamingThink(text: string): string {
+  return text.replace(/<think>[\s\S]*$/, "…thinking…")
 }
 
 // ── Slash commands ────────────────────────────────────────────────────────────
@@ -409,7 +479,7 @@ interface AgenticToolGroup { kind: "tools"; steps: AgenticStep[] }
 type AgenticItem = AgenticContentBlock | AgenticToolGroup
 
 type DisplayMsg =
-  | { kind: "chat"; role: "user" | "assistant"; content: string; streaming?: boolean }
+  | { kind: "chat"; role: "user" | "assistant"; content: string; streaming?: boolean; attachments?: Array<{ type: "file" | "image"; name: string; dataUrl?: string }> }
   | { kind: "agentic"; items: AgenticItem[]; streaming: boolean; routedModel?: string }
 
 // ── Agentic step detail row ───────────────────────────────────────────────────
@@ -687,7 +757,7 @@ export function ChatHub({ model, models = [], onModelChange }: ChatHubProps) {
   // Thinking mode for capable models (deepseek-r1, qwq, etc.)
   const [thinking, setThinking] = useState(false)
   // File / image attachments
-  const [attachments, setAttachments] = useState<Array<{ type: "file" | "image"; name: string; content: string }>>([])
+  const [attachments, setAttachments] = useState<Array<{ type: "file" | "image"; name: string; content: string; dataUrl?: string }>>([])
   const fileRef = useRef<HTMLInputElement>(null)
   const imgRef = useRef<HTMLInputElement>(null)
 
@@ -725,7 +795,7 @@ export function ChatHub({ model, models = [], onModelChange }: ChatHubProps) {
     reader.onload = ev => {
       const dataUrl = ev.target?.result as string
       const base64 = dataUrl.split(",")[1]
-      setAttachments(a => [...a, { type: "image", name: file.name, content: base64 }])
+      setAttachments(a => [...a, { type: "image", name: file.name, content: base64, dataUrl }])
     }
     reader.readAsDataURL(file)
     e.target.value = ""
@@ -877,18 +947,35 @@ export function ChatHub({ model, models = [], onModelChange }: ChatHubProps) {
     setCmdIdx(0)
   }, [activeId, model, updateSession])
 
-  const handleInputKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (!showCmds) return
-    if (e.key === "ArrowDown") {
-      e.preventDefault(); setCmdIdx(i => (i + 1) % cmdMatches.length)
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault(); setCmdIdx(i => (i - 1 + cmdMatches.length) % cmdMatches.length)
-    } else if (e.key === "Tab" || e.key === "Enter") {
-      e.preventDefault(); applyCmd(cmdMatches[Math.min(cmdIdx, cmdMatches.length - 1)])
-    } else if (e.key === "Escape") {
-      setInput(""); setCmdIdx(0)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const formRef = useRef<HTMLFormElement>(null)
+
+  // Auto-resize textarea
+  useEffect(() => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = "auto"
+    el.style.height = Math.min(el.scrollHeight, 120) + "px"
+  }, [input])
+
+  const handleInputKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showCmds) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault(); setCmdIdx(i => (i + 1) % cmdMatches.length)
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault(); setCmdIdx(i => (i - 1 + cmdMatches.length) % cmdMatches.length)
+      } else if (e.key === "Tab" || e.key === "Enter") {
+        e.preventDefault(); applyCmd(cmdMatches[Math.min(cmdIdx, cmdMatches.length - 1)])
+      } else if (e.key === "Escape") {
+        setInput(""); setCmdIdx(0)
+      }
+      return
     }
-  }, [showCmds, cmdMatches, cmdIdx, applyCmd])
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault()
+      if (input.trim() && !isLoading) formRef.current?.requestSubmit()
+    }
+  }, [showCmds, cmdMatches, cmdIdx, applyCmd, input, isLoading])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -929,6 +1016,10 @@ export function ChatHub({ model, models = [], onModelChange }: ChatHubProps) {
     const fileTexts = attachments.filter(a => a.type === "file")
       .map(a => `\n\n---\n**${a.name}**\n\`\`\`\n${a.content}\n\`\`\``).join("")
     const images = attachments.filter(a => a.type === "image").map(a => a.content)
+    // Capture display attachments before clearing (images keep dataUrl for rendering)
+    const displayAttachments: Array<{ type: "file" | "image"; name: string; dataUrl?: string }> = attachments.map(a => ({
+      type: a.type, name: a.name, ...(a.dataUrl ? { dataUrl: a.dataUrl } : {}),
+    }))
     setAttachments([])
 
     const userMsg: ChatMessage = {
@@ -944,7 +1035,10 @@ export function ChatHub({ model, models = [], onModelChange }: ChatHubProps) {
       messages: newMessages,
     }))
 
-    setDisplay(prev => [...prev, { kind: "chat", role: "user", content: userText }])
+    setDisplay(prev => [...prev, {
+      kind: "chat", role: "user", content: userText,
+      ...(displayAttachments.length > 0 && { attachments: displayAttachments }),
+    }])
 
     const ctrl = new AbortController()
     abortRef.current = ctrl
@@ -1253,6 +1347,20 @@ export function ChatHub({ model, models = [], onModelChange }: ChatHubProps) {
                       className="flex justify-end"
                     >
                       <div className="max-w-[80%] rounded-2xl rounded-tr-none px-4 py-2.5 text-xs leading-relaxed shadow-sm bg-primary text-primary-foreground">
+                        {msg.attachments && msg.attachments.length > 0 && (
+                          <div className="mb-2 flex flex-wrap gap-1.5">
+                            {msg.attachments.map((a, ai) => (
+                              a.type === "image" && a.dataUrl ? (
+                                <img key={ai} src={a.dataUrl} className="max-h-36 max-w-full rounded-lg border border-white/20 object-cover" alt={a.name} />
+                              ) : (
+                                <div key={ai} className="flex items-center gap-1 px-2 py-1 rounded-lg bg-white/15 text-[9px] font-mono">
+                                  <FileText size={8} className="shrink-0" />
+                                  <span className="truncate max-w-[120px]">{a.name}</span>
+                                </div>
+                              )
+                            ))}
+                          </div>
+                        )}
                         <p className="whitespace-pre-wrap break-words">{msg.content}</p>
                       </div>
                     </motion.div>
@@ -1270,7 +1378,7 @@ export function ChatHub({ model, models = [], onModelChange }: ChatHubProps) {
                       {isStreaming ? (
                         <>
                           {msg.content
-                            ? <div className="space-y-1">{renderContent(msg.content)}
+                            ? <div className="space-y-1">{renderContent(stripStreamingThink(msg.content))}
                                 <motion.span animate={{ opacity: [1, 0] }} transition={{ duration: 0.55, repeat: Infinity, repeatType: "reverse" }}
                                   className="inline-block w-[5px] h-[11px] bg-foreground/40 ml-px align-middle" />
                               </div>
@@ -1323,7 +1431,7 @@ export function ChatHub({ model, models = [], onModelChange }: ChatHubProps) {
               "text-[7.5px] font-mono tabular-nums shrink-0",
               ctxOverThreshold ? "text-amber-400/70" : "text-muted-foreground/25",
             ].join(" ")}>
-              {ctxTokens.toLocaleString()}/{ctxWindowRaw ? CTX_WINDOW.toLocaleString() : "…"}
+              {ctxTokens.toLocaleString()}/{CTX_WINDOW.toLocaleString()}
               {ctxOverThreshold && appSettings?.context_compression && " · auto"}
             </span>
           </div>
@@ -1376,9 +1484,9 @@ export function ChatHub({ model, models = [], onModelChange }: ChatHubProps) {
             )}
           </AnimatePresence>
 
-          <form onSubmit={handleSubmit} className="flex items-center gap-2">
+          <form ref={formRef} onSubmit={handleSubmit} className="flex items-start gap-2">
             {/* Accessory buttons */}
-            <div className="flex items-center gap-0.5 shrink-0">
+            <div className="flex items-center gap-0.5 shrink-0 pt-1">
               <button
                 type="button"
                 onClick={() => fileRef.current?.click()}
@@ -1419,19 +1527,21 @@ export function ChatHub({ model, models = [], onModelChange }: ChatHubProps) {
 
             {/* Text input */}
             <div className="relative flex-1">
-              <input
+              <textarea
+                ref={textareaRef}
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={handleInputKeyDown}
                 placeholder={
                   useAgentic
-                    ? "Ask anything — tools available…"
+                    ? "Ask anything — tools available… (Shift+Enter for newline)"
                     : isMollama
                       ? "Ask anything — best model auto-selected…"
-                      : "Type / for commands…"
+                      : "Type / for commands… (Shift+Enter for newline)"
                 }
                 disabled={isLoading}
-                className="w-full h-10 px-3 text-xs rounded-xl bg-background/50 border border-border/40 focus:outline-none focus:ring-1 focus:ring-primary/40 focus:border-primary/30 placeholder:text-muted-foreground/25 transition-all disabled:opacity-50"
+                rows={1}
+                className="w-full min-h-10 px-3 py-2.5 text-xs rounded-xl bg-background/50 border border-border/40 focus:outline-none focus:ring-1 focus:ring-primary/40 focus:border-primary/30 placeholder:text-muted-foreground/25 transition-all disabled:opacity-50 resize-none overflow-hidden leading-relaxed"
               />
             </div>
 

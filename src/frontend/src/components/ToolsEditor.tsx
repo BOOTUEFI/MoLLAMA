@@ -5,7 +5,7 @@ import {
   Code2, Plus, Trash2, RefreshCcw, Save, ChevronRight, ChevronDown,
   Loader2, CheckCircle2, Wrench, FileCode, ArrowLeft,
   Search, Sparkles, Play, X, FileText, FileJson, File,
-  AlertCircle, Upload,
+  AlertCircle, Upload, MessageSquare, Send, FolderPlus, Folder, FolderOpen,
 } from "lucide-react"
 import { AnimatePresence, motion } from "framer-motion"
 import {
@@ -14,11 +14,11 @@ import {
 } from "@/components/ui/dropdown-menu"
 import {
   useTools, useToolFile, useSaveToolFile, useDeleteToolFile,
-  useReloadTools, useRunTool, useGenerateTool, useModels,
+  useReloadTools, useRunTool, useModels,
 } from "@/hooks/use-api"
-import { uploadToolFile } from "@/lib/api"
+import { uploadToolFile, sendAgenticMessage, generateToolStream } from "@/lib/api"
 import { toast } from "sonner"
-import type { ToolFile } from "@/lib/api"
+import type { ToolFile, ChatMessage } from "@/lib/api"
 
 // ── Language helpers ───────────────────────────────────────────────────────────
 
@@ -278,12 +278,13 @@ function AiGenerateDialog({ onClose, onCreated }: {
   onCreated: (path: string) => void
 }) {
   const { data: modelsData } = useModels()
-  const { mutateAsync: generate, isPending: isGenerating } = useGenerateTool()
   const { mutateAsync: save, isPending: isSaving } = useSaveToolFile()
   const [description, setDescription] = useState("")
   const [fileName, setFileName] = useState("")
   const [model, setModel] = useState("")
-  const [preview, setPreview] = useState("")
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [streamLines, setStreamLines] = useState<string[]>([])
+  const [generatedCode, setGeneratedCode] = useState("")
   const models = modelsData ?? []
 
   useEffect(() => {
@@ -292,15 +293,29 @@ function AiGenerateDialog({ onClose, onCreated }: {
 
   const handleGenerate = async () => {
     if (!description.trim()) return
+    setIsGenerating(true)
+    setStreamLines([])
+    setGeneratedCode("")
     try {
-      const res = await generate({ description, model })
-      setPreview(res.code)
-      if (!fileName) {
-        const m = res.code.match(/^def (\w+)/m)
-        if (m) setFileName(m[1])
+      let accumulated = ""
+      for await (const ev of generateToolStream(description, model)) {
+        if (ev.type === "delta" && ev.text) {
+          accumulated += ev.text
+          // Show last 2 non-empty lines of accumulated output
+          const lines = accumulated.split("\n").filter(l => l.trim())
+          setStreamLines(lines.slice(-2))
+        } else if (ev.type === "done" && ev.code) {
+          setGeneratedCode(ev.code)
+          if (!fileName) {
+            const m = ev.code.match(/^def (\w+)/m)
+            if (m) setFileName(m[1])
+          }
+        }
       }
     } catch (e: any) {
       toast.error("Generation failed", { description: e.message })
+    } finally {
+      setIsGenerating(false)
     }
   }
 
@@ -309,7 +324,7 @@ function AiGenerateDialog({ onClose, onCreated }: {
     if (!clean) { toast.error("Enter a file name"); return }
     const path = `${clean}.py`
     try {
-      await save({ path, code: preview })
+      await save({ path, code: generatedCode })
       toast.success(`Created ${path}`)
       onCreated(path)
     } catch (e: any) {
@@ -393,13 +408,43 @@ function AiGenerateDialog({ onClose, onCreated }: {
             </div>
           </div>
 
-          {preview && (
-            <div className="rounded-xl border border-white/[0.06] overflow-hidden">
-              <div className="px-3 py-1.5 bg-white/[0.03] border-b border-white/[0.04] flex items-center gap-2">
-                <FileCode size={9} className="text-primary/50" />
-                <span className="text-[8px] font-mono uppercase tracking-widest text-muted-foreground/40">Preview</span>
-              </div>
-              <pre className="p-3 text-[10px] font-mono text-muted-foreground/60 overflow-auto max-h-44 bg-[#080811] leading-relaxed">{preview}</pre>
+          {/* Stream output — last 2 lines while generating */}
+          <AnimatePresence>
+            {(isGenerating || streamLines.length > 0) && !generatedCode && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }}
+                className="overflow-hidden"
+              >
+                <div className="rounded-xl border border-primary/15 bg-black/40 px-3 py-2.5 space-y-1">
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    {isGenerating && <Loader2 size={9} className="animate-spin text-primary/60" />}
+                    <span className="text-[8px] font-mono uppercase tracking-widest text-primary/40">
+                      {isGenerating ? "Generating…" : "Done"}
+                    </span>
+                  </div>
+                  {streamLines.map((line, i) => (
+                    <p key={i} className="text-[10px] font-mono text-muted-foreground/60 truncate leading-relaxed">
+                      {line}
+                    </p>
+                  ))}
+                  {isGenerating && (
+                    <motion.span
+                      animate={{ opacity: [1, 0] }}
+                      transition={{ duration: 0.55, repeat: Infinity, repeatType: "reverse" }}
+                      className="inline-block w-[5px] h-[10px] bg-primary/40 align-middle ml-0.5"
+                    />
+                  )}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {generatedCode && (
+            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 flex items-center gap-2">
+              <FileCode size={10} className="text-emerald-400/70 shrink-0" />
+              <span className="text-[9px] font-mono text-emerald-400/70">
+                Generated {generatedCode.split("\n").length} lines · ready to save
+              </span>
             </div>
           )}
 
@@ -407,7 +452,7 @@ function AiGenerateDialog({ onClose, onCreated }: {
             <button onClick={onClose} className="flex-1 h-9 rounded-xl border border-white/[0.07] text-[9px] font-mono uppercase tracking-widest text-muted-foreground hover:bg-white/[0.04] transition-colors">
               Cancel
             </button>
-            {preview ? (
+            {generatedCode ? (
               <button onClick={handleSave} disabled={isSaving} className="flex-1 h-9 rounded-xl bg-primary text-[9px] font-mono font-black uppercase tracking-widest text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors flex items-center justify-center gap-1.5">
                 {isSaving ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
                 Save File
@@ -506,8 +551,7 @@ export function ToolFileList({ selectedPath, onSelect }: {
             <Plus size={11} />
           </button>
         </div>
-        <input ref={uploadRef} type="file" className="hidden" onChange={handleUpload}
-          accept=".py,.md,.txt,.json,.yaml,.yml,.toml,.sh,.env,.cfg,.ini" />
+        <input ref={uploadRef} type="file" className="hidden" onChange={handleUpload} />
       </div>
 
       {/* Search */}
@@ -635,6 +679,165 @@ export function ToolFileList({ selectedPath, onSelect }: {
         {showNew && <NewFileDialog onClose={() => setShowNew(false)} onCreated={path => { setShowNew(false); onSelect(path) }} />}
         {showAi && <AiGenerateDialog onClose={() => setShowAi(false)} onCreated={path => { setShowAi(false); onSelect(path) }} />}
       </AnimatePresence>
+    </div>
+  )
+}
+
+// ── ToolLeftPanel ──────────────────────────────────────────────────────────────
+
+export function ToolLeftPanel({ selectedPath, onSelect, fileCode, model }: {
+  selectedPath: string | null
+  onSelect: (path: string) => void
+  fileCode: string
+  model: string
+}) {
+  const [tab, setTab] = useState<"files" | "agent">("files")
+
+  return (
+    <div className="h-full flex flex-col overflow-hidden">
+      {/* Tab buttons */}
+      <div className="shrink-0 flex items-center gap-0.5 px-1 py-1 border-b border-border/30 bg-muted/5">
+        {(["files", "agent"] as const).map(t => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={[
+              "flex items-center gap-1 px-2.5 py-1 rounded-lg text-[9px] font-mono uppercase tracking-widest transition-colors border",
+              tab === t
+                ? "bg-background/60 text-foreground border-border/40"
+                : "text-muted-foreground/40 hover:text-muted-foreground/70 border-transparent",
+            ].join(" ")}
+          >
+            {t === "files" ? <Wrench size={8} /> : <MessageSquare size={8} />}
+            {t}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-hidden">
+        {tab === "files" ? (
+          <div className="h-full">
+            <ToolFileList selectedPath={selectedPath} onSelect={onSelect} />
+          </div>
+        ) : (
+          <div className="h-full border-t-0 border border-border/40 bg-card/30 backdrop-blur-xl overflow-hidden">
+            {selectedPath ? (
+              <EditorChat filePath={selectedPath} fileCode={fileCode} model={model} />
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground/25">
+                <MessageSquare size={20} />
+                <p className="text-[9px] font-mono">Select a file first</p>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── ToolEditorPane ─────────────────────────────────────────────────────────────
+
+// ── EditorChat ─────────────────────────────────────────────────────────────────
+
+interface EditorChatMsg { role: "user" | "assistant"; content: string; streaming?: boolean }
+
+function EditorChat({ filePath, fileCode, model }: { filePath: string; fileCode: string; model: string }) {
+  const [msgs, setMsgs] = useState<EditorChatMsg[]>([])
+  const [input, setInput] = useState("")
+  const [busy, setBusy] = useState(false)
+  const abortRef = useRef<AbortController | null>(null)
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }) }, [msgs])
+
+  const send = async () => {
+    const text = input.trim()
+    if (!text || busy) return
+    setInput("")
+    const userMsg: EditorChatMsg = { role: "user", content: text }
+    setMsgs(p => [...p, userMsg])
+    setBusy(true)
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    const fileCtx = fileCode ? `\`\`\`\n${fileCode.slice(0, 8000)}\n\`\`\`` : "(no code loaded)"
+    const toolsDir = "/data/tools"
+    const history: ChatMessage[] = [
+      { role: "system", content: `You are a coding assistant for the Mollama tool system.\nThe user is editing: ${filePath}\nFull path: ${toolsDir}/${filePath}\n\nWhen writing files, ALWAYS use the exact path: ${toolsDir}/${filePath}\n\nFile contents:\n${fileCtx}` },
+      ...msgs.map(m => ({ role: m.role as "user" | "assistant", content: m.content })),
+      { role: "user", content: text },
+    ]
+    setMsgs(p => [...p, { role: "assistant", content: "", streaming: true }])
+    try {
+      let acc = ""
+      for await (const ev of sendAgenticMessage(history, model || "mollama", ctrl.signal)) {
+        if (ev.type === "delta") {
+          acc += ev.text
+          setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, content: acc } : m))
+        } else if (ev.type === "done") {
+          setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, content: ev.text || acc, streaming: false } : m))
+          break
+        } else if (ev.type === "error") {
+          toast.error(ev.error)
+          setMsgs(p => p.slice(0, -1))
+          break
+        }
+      }
+    } catch (e: any) {
+      if (e.name !== "AbortError") toast.error(e.message)
+      setMsgs(p => p.filter(m => !m.streaming))
+    } finally {
+      setBusy(false)
+      abortRef.current = null
+    }
+  }
+
+  return (
+    <div className="flex flex-col h-full bg-transparent">
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto min-h-0 px-3 py-3 space-y-3 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:bg-border/25 [&::-webkit-scrollbar-thumb]:rounded-full">
+        {msgs.length === 0 && (
+          <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground/30">
+            <MessageSquare size={20} />
+            <p className="text-[9px] font-mono">Ask about this file…</p>
+          </div>
+        )}
+        {msgs.map((m, i) => (
+          <div key={i} className={["flex gap-2", m.role === "user" ? "justify-end" : "justify-start"].join(" ")}>
+            <div className={[
+              "max-w-[85%] px-3 py-2 rounded-xl text-[10px] font-mono leading-relaxed whitespace-pre-wrap break-words",
+              m.role === "user"
+                ? "bg-primary/15 text-foreground/80 border border-primary/15"
+                : "bg-muted/20 text-foreground/70 border border-border/15",
+            ].join(" ")}>
+              {m.content}
+              {m.streaming && <span className="inline-block w-1 h-3 ml-0.5 bg-primary/70 animate-pulse rounded-sm" />}
+            </div>
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Input */}
+      <div className="shrink-0 border-t border-border/30 px-3 py-2 flex gap-2">
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send() } }}
+          placeholder="Ask about this file…"
+          disabled={busy}
+          className="flex-1 bg-transparent text-[10px] font-mono placeholder:text-muted-foreground/20 text-foreground/80 outline-none disabled:opacity-50"
+        />
+        {busy ? (
+          <button onClick={() => abortRef.current?.abort()} className="p-1 rounded text-red-400/60 hover:text-red-400 transition-colors">
+            <X size={11} />
+          </button>
+        ) : (
+          <button onClick={send} disabled={!input.trim()} className="p-1 rounded text-primary/60 hover:text-primary disabled:opacity-30 transition-colors">
+            <Send size={11} />
+          </button>
+        )}
+      </div>
     </div>
   )
 }
@@ -785,6 +988,12 @@ export function ToolEditorPane({ selectedPath, onClose }: {
           <span className="text-[8px] font-mono text-amber-400/60 uppercase shrink-0">●</span>
         )}
 
+        {/* Editor-only label */}
+        <div className="flex items-center gap-1 px-2 py-1 rounded-md text-[8.5px] font-mono uppercase tracking-widest text-muted-foreground/30 shrink-0">
+          <Code2 size={8} />
+          Editor
+        </div>
+
         <div className="flex items-center gap-0.5 shrink-0">
           {functions.length > 0 && (
             <button
@@ -824,7 +1033,7 @@ export function ToolEditorPane({ selectedPath, onClose }: {
         </div>
       </div>
 
-      {/* Monaco */}
+      {/* Main area — Monaco editor */}
       <div className="flex-1 overflow-hidden min-h-0">
         {isFileLoading ? (
           <div className="flex items-center justify-center h-full bg-[#080811]">
@@ -961,8 +1170,8 @@ export function ToolEditorPane({ selectedPath, onClose }: {
         )}
       </AnimatePresence>
 
-      {/* Status bar */}
-      <StatusBar path={selectedPath} line={cursorPos.line} col={cursorPos.col} dirty={dirty} saved={saved} />
+      {/* Status bar (editor tab only) */}
+      {<StatusBar path={selectedPath} line={cursorPos.line} col={cursorPos.col} dirty={dirty} saved={saved} />}
     </div>
   )
 }

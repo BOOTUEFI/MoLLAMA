@@ -128,9 +128,11 @@ function SystemPromptEditor() {
   const [draft, setDraft] = useState("")
   const [saved, setSaved] = useState(false)
   const [charCount, setCharCount] = useState(0)
+  const initialized = useRef(false)
 
   useEffect(() => {
-    if (prompt !== undefined) {
+    if (prompt !== undefined && !initialized.current) {
+      initialized.current = true
       setDraft(prompt)
       setCharCount(prompt.length)
     }
@@ -590,6 +592,12 @@ export function SettingsPanel({ selectedModel, onModelChange, onClose }: Props) 
                 <DataRow label="Compact trigger" value="Every 3 messages" />
                 <DataRow label="History kept" value="Last 3 messages" />
                 <DataRow label="Compression" value="LLM summarisation" />
+              </SectionBox>
+
+              <SectionBox title="Smart Model" icon={<GitBranch size={10} />}>
+                <p className="text-[9px] font-mono text-muted-foreground/50 leading-relaxed">
+                  Select <strong className="text-foreground/60">mollama</strong> as your model to use smart routing — it automatically dispatches tasks to the best available model based on complexity and context size.
+                </p>
               </SectionBox>
             </TabsContent>
 

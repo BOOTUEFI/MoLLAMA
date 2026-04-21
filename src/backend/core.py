@@ -38,6 +38,22 @@ _model_cache_ts: float = 0.0
 _latest_ollama_version: Optional[str] = None
 _latest_ollama_version_ts: float = 0.0
 _maintenance_lock: asyncio.Lock | None = None
+_shutting_down: bool = False  # set True during lifespan teardown to abort new thread dispatches
+
+
+def mark_shutting_down() -> None:
+    global _shutting_down
+    _shutting_down = True
+
+
+async def _safe_to_thread(func, *args):
+    """Like asyncio.to_thread but returns None gracefully during shutdown."""
+    if _shutting_down:
+        return None
+    try:
+        return await asyncio.to_thread(func, *args)
+    except (RuntimeError, asyncio.CancelledError):
+        return None
 
 _maintenance_state: dict[str, Any] = {
     "running": False,
@@ -315,7 +331,7 @@ async def get_current_ollama_version() -> Optional[str]:
             candidates.append(name)
 
     for name in candidates:
-        version = await asyncio.to_thread(_instance_ollama_version_sync, name)
+        version = await _safe_to_thread(_instance_ollama_version_sync, name)
         if version:
             return version
 
@@ -329,9 +345,9 @@ async def get_latest_ollama_version() -> Optional[str]:
     if _latest_ollama_version and (now - _latest_ollama_version_ts) < LATEST_VERSION_CACHE_TTL:
         return _latest_ollama_version
 
-    version = await asyncio.to_thread(_probe_remote_latest_ollama_version_sync)
+    version = await _safe_to_thread(_probe_remote_latest_ollama_version_sync)
     if not version:
-        version = await asyncio.to_thread(_probe_local_ollama_version_sync)
+        version = await _safe_to_thread(_probe_local_ollama_version_sync)
 
     if version:
         _latest_ollama_version = version
@@ -352,9 +368,9 @@ async def refresh_latest_ollama_version() -> Optional[str]:
     except Exception:
         pass
 
-    version = await asyncio.to_thread(_probe_remote_latest_ollama_version_sync)
+    version = await _safe_to_thread(_probe_remote_latest_ollama_version_sync)
     if not version:
-        version = await asyncio.to_thread(_probe_local_ollama_version_sync)
+        version = await _safe_to_thread(_probe_local_ollama_version_sync)
 
     if version:
         _latest_ollama_version = version
@@ -881,7 +897,7 @@ async def select_best_model_for_prompt(
     messages: list[dict],
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """
-    Uses the main node's first model to pick the best model for the prompt.
+    Uses the orchestrator (if enabled) or the main node LLM to pick the best model.
     Returns (instance_name, base_url, model_name) or (None, None, None).
     """
     main = get_main_node()
@@ -892,6 +908,21 @@ async def select_best_model_for_prompt(
 
     main_name, main_url = main
     all_models = await get_all_instance_models_cached()
+
+    # ── Orchestrator fast-path ──────────────────────────────────────────────────
+    try:
+        from orchestrator import select_orchestrator_model
+        flat_all = sorted({m for mlist in all_models.values() for m in mlist if m})
+        orch_model, _ = select_orchestrator_model(messages, flat_all)
+        if orch_model:
+            data = load_data()
+            for inst_name, mlist in all_models.items():
+                if orch_model in mlist and _health.get(inst_name, False):
+                    inst = data.get(inst_name, {})
+                    return inst_name, inst.get("base_url", ""), orch_model
+    except Exception:
+        pass
+    # ── Fall through to LLM-based routing ──────────────────────────────────────
 
     main_models = all_models.get(main_name, [])
     if not main_models:
@@ -1234,7 +1265,10 @@ async def _shutdown_managed() -> None:
         except Exception:
             return []
 
-    containers = await asyncio.to_thread(get_managed_containers)
+    try:
+        containers = await asyncio.to_thread(get_managed_containers)
+    except (RuntimeError, asyncio.CancelledError):
+        return
     if not containers:
         return
 
@@ -1244,7 +1278,10 @@ async def _shutdown_managed() -> None:
         except Exception:
             pass
 
-    await asyncio.gather(
-        *(asyncio.to_thread(stop_single_container, c) for c in containers),
-        return_exceptions=True,
-    )
+    try:
+        await asyncio.gather(
+            *(asyncio.to_thread(stop_single_container, c) for c in containers),
+            return_exceptions=True,
+        )
+    except (RuntimeError, asyncio.CancelledError):
+        pass
