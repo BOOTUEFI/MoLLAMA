@@ -80,7 +80,6 @@ def _extract_content_from_data(data: dict) -> str:
     msg = data.get("message", {}) or {}
     choices = data.get("choices", []) or []
     
-    # Check first choice for standard message or delta (streaming)
     choice_msg = choices[0].get("message", {}) if choices else {}
     choice_delta = choices[0].get("delta", {}) if choices else {}
 
@@ -106,7 +105,6 @@ def _normalize_tool_calls(msg: dict, content: str):
 
     tool_calls_json = normalized
     
-    # Fallback for XML style tool calls (common in some Ollama models)
     has_xml_tools = "<function_calls>" in (content or "")
     if has_xml_tools and not tool_calls_json:
         match = re.search(
@@ -205,7 +203,6 @@ async def _run_internal_tool_loop(
             if not f_name:
                 continue
 
-            # JSON Argument Validation
             if isinstance(args, str):
                 try:
                     json.loads(args)
@@ -242,7 +239,7 @@ async def _run_internal_tool_loop(
 ## ── PROXY ENTRY POINT ─────────────────────────────────────────────────────
 
 async def _proxy(request: Request, upstream_path: str) -> Response:
-    req_id = str(uuid.uuid4())[:8]
+    req_id = f"msg_{uuid.uuid4().hex[:16]}"
     body = await request.body()
     
     headers = {
@@ -280,12 +277,30 @@ async def _proxy(request: Request, upstream_path: str) -> Response:
 
             for m in body_json.get("messages", []):
                 content = m.get("content", "")
+                images = []
+                
+                # Handle Anthropic block content arrays (text + base64 images)
                 if isinstance(content, list):
-                    content = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-                new_body["messages"].append({"role": m.get("role", "user"), "content": content})
+                    text_parts = []
+                    for b in content:
+                        if b.get("type") == "text":
+                            text_parts.append(b.get("text", ""))
+                        elif b.get("type") == "image":
+                            source = b.get("source", {})
+                            if source.get("type") == "base64" and "data" in source:
+                                images.append(source["data"])
+                    content = "".join(text_parts)
+                
+                msg_obj = {"role": m.get("role", "user"), "content": content}
+                if images:
+                    msg_obj["images"] = images
+                new_body["messages"].append(msg_obj)
 
             if "max_tokens" in body_json: new_body["options"]["num_predict"] = body_json["max_tokens"]
             if "temperature" in body_json: new_body["options"]["temperature"] = body_json["temperature"]
+            if "top_p" in body_json: new_body["options"]["top_p"] = body_json["top_p"]
+            if "top_k" in body_json: new_body["options"]["top_k"] = body_json["top_k"]
+            
             body_json = new_body
             is_stream = body_json.get("stream", True)
 
@@ -321,7 +336,6 @@ async def _proxy(request: Request, upstream_path: str) -> Response:
             else:
                 messages.insert(0, {"role": "system", "content": sys_prompt})
 
-        # Context compression: summarise long histories to reduce token usage
         _compress_url = None
         _compress_model = body_json.get("model", "")
         active = core.get_active_instances()
@@ -332,7 +346,6 @@ async def _proxy(request: Request, upstream_path: str) -> Response:
                 body_json["messages"], _compress_model, _compress_url
             )
 
-        # MCP schemas are always merged into local tool schemas
         from mcp_manager import mcp_manager
         mcp_schemas = mcp_manager.get_all_tool_schemas()
         if mcp_schemas:
@@ -397,14 +410,38 @@ async def _proxy(request: Request, upstream_path: str) -> Response:
                         full_txt = _extract_content_from_data(final_data)
                         _ev.update_stream(req_id, "", False, target_name, upstream_path, t0)
                         try:
+                            if dialect == "anthropic":
+                                yield b'event: message_start\n'
+                                start_data = {
+                                    "type": "message_start",
+                                    "message": {
+                                        "id": req_id, "type": "message", "role": "assistant",
+                                        "model": requested_model or "unknown",
+                                        "usage": {"input_tokens": 1, "output_tokens": 0}
+                                    }
+                                }
+                                yield f'data: {json.dumps(start_data)}\n\n'.encode()
+                                yield b'event: content_block_start\ndata: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}\n\n'
+
                             for i in range(0, len(full_txt), 12):
                                 chunk = full_txt[i:i+12]
                                 if dialect == "openai":
                                     yield f"data: {json.dumps({'choices': [{'delta': {'content': chunk}}]})}\n\n".encode()
+                                elif dialect == "anthropic":
+                                    yield b'event: content_block_delta\n'
+                                    delta = {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": chunk}}
+                                    yield f'data: {json.dumps(delta)}\n\n'.encode()
                                 else:
                                     yield json.dumps({"message": {"content": chunk}, "done": False}).encode() + b"\n"
                                 await asyncio.sleep(0.01)
-                            if dialect == "openai": yield b"data: [DONE]\n\n"
+
+                            if dialect == "openai": 
+                                yield b"data: [DONE]\n\n"
+                            elif dialect == "anthropic":
+                                yield b'event: content_block_stop\ndata: {"type": "content_block_stop", "index": 0}\n\n'
+                                yield b'event: message_delta\n'
+                                yield f'data: {json.dumps({"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": len(full_txt)//4}})}\n\n'.encode()
+                                yield b'event: message_stop\ndata: {"type": "message_stop"}\n\n'
                         finally:
                             _ev.update_stream(req_id, full_txt, True)
                             _ev.set_processing(target_name, False)
@@ -419,18 +456,117 @@ async def _proxy(request: Request, upstream_path: str) -> Response:
                         continue
                     
                     async def stream_gen():
+                        sent_start = False
                         try:
                             async for line in resp.aiter_lines():
-                                yield (line + "\n").encode()
+                                if not line.strip(): continue
+                                
+                                # If it's already SSE formatted
+                                if line.startswith("data: ") or line.startswith("event: "):
+                                    yield (line + "\n\n").encode() 
+                                    continue
+
+                                try:
+                                    chunk = json.loads(line)
+                                except: 
+                                    continue
+                                
+                                if dialect == "anthropic":
+                                    if not sent_start:
+                                        yield b'event: message_start\n'
+                                        start_data = {
+                                            "type": "message_start",
+                                            "message": {
+                                                "id": req_id, "type": "message", "role": "assistant", 
+                                                "model": requested_model or chunk.get("model", "unknown"),
+                                                "usage": {"input_tokens": 1, "output_tokens": 0}
+                                            }
+                                        }
+                                        yield f'data: {json.dumps(start_data)}\n\n'.encode()
+                                        yield b'event: content_block_start\ndata: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}\n\n'
+                                        sent_start = True
+                                    
+                                    content = chunk.get("message", {}).get("content", "")
+                                    if content:
+                                        yield b'event: content_block_delta\n'
+                                        delta = {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": content}}
+                                        yield f'data: {json.dumps(delta)}\n\n'.encode()
+                                    
+                                    if chunk.get("done"):
+                                        yield b'event: content_block_stop\ndata: {"type": "content_block_stop", "index": 0}\n\n'
+                                        yield b'event: message_delta\n'
+                                        delta_payload = {
+                                            "type": "message_delta", 
+                                            "delta": {"stop_reason": "end_turn", "stop_sequence": None}, 
+                                            "usage": {"output_tokens": chunk.get("eval_count", 0)}
+                                        }
+                                        yield f'data: {json.dumps(delta_payload)}\n\n'.encode()
+                                        yield b'event: message_stop\ndata: {"type": "message_stop"}\n\n'
+
+                                elif dialect == "openai":
+                                    content = chunk.get("message", {}).get("content", "")
+                                    if content:
+                                        payload = {
+                                            "id": req_id,
+                                            "object": "chat.completion.chunk",
+                                            "created": int(time.time()),
+                                            "model": requested_model or chunk.get("model", "unknown"),
+                                            "choices": [{"index": 0, "delta": {"content": content}}]
+                                        }
+                                        yield f"data: {json.dumps(payload)}\n\n".encode()
+                                    if chunk.get("done"):
+                                        yield b"data: [DONE]\n\n"
+                                
+                                else:
+                                    yield (line + "\n\n").encode()
                         finally:
                             await resp.aclose()
                             _ev.set_processing(target_name, False)
-                    return StreamingResponse(stream_gen(), status_code=resp.status_code)
+
+                    
+                    return StreamingResponse(stream_gen(), status_code=resp.status_code, media_type="text/event-stream")
+
                 else:
                     resp = await client.request(method=request.method, url=url, headers=headers, content=body)
                     _ev.set_processing(target_name, False)
                     if resp.status_code in (401, 403, 429) or resp.status_code >= 500: continue
-                    return Response(content=resp.content, status_code=resp.status_code, headers=dict(resp.headers))
+                    
+                    content_bytes = resp.content
+                    if resp.status_code == 200:
+                        try:
+                            data = json.loads(content_bytes)
+                            text_val = data.get("message", {}).get("content", "") or data.get("response", "")
+                            i_t = data.get("prompt_eval_count", 0)
+                            o_t = data.get("eval_count", 0)
+                            
+                            if dialect == "anthropic":
+                                anthropic_resp = {
+                                    "id": req_id,
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "model": requested_model or data.get("model", "unknown"),
+                                    "content": [{"type": "text", "text": text_val}],
+                                    "stop_reason": "end_turn",
+                                    "stop_sequence": None,
+                                    "usage": {"input_tokens": i_t, "output_tokens": o_t}
+                                }
+                                content_bytes = json.dumps(anthropic_resp).encode("utf-8")
+                            elif dialect == "openai":
+                                openai_resp = {
+                                    "id": req_id,
+                                    "object": "chat.completion",
+                                    "created": int(time.time()),
+                                    "model": requested_model or data.get("model", "unknown"),
+                                    "choices": [{"index": 0, "message": {"role": "assistant", "content": text_val}, "finish_reason": "stop"}],
+                                    "usage": {"prompt_tokens": i_t, "completion_tokens": o_t, "total_tokens": i_t + o_t}
+                                }
+                                content_bytes = json.dumps(openai_resp).encode("utf-8")
+                        except Exception:
+                            pass
+                    
+                    resp_headers = dict(resp.headers)
+                    resp_headers.pop("content-length", None)
+                    return Response(content=content_bytes, status_code=resp.status_code, headers=resp_headers)
 
             except Exception:
                 _ev.set_processing(target_name, False)

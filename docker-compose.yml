@@ -7,15 +7,25 @@ services:
       target: backend
     container_name: mollama_backend
     restart: unless-stopped
+    # This sets the "Home" of your AI to the root of your Windows drives
+    working_dir: /mnt/host
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
     volumes:
       - ./src/backend:/app
       - /var/run/docker.sock:/var/run/docker.sock
       - proxy_data:/data
+      # WINDOWS 11 AUTO-DRIVE MOUNT:
+      # This maps the internal Docker Desktop mount point for all Windows drives.
+      # Inside the container, C: is /mnt/host/c, D: is /mnt/host/d, etc.
+      - /run/desktop/mnt/host:/mnt/host
     ports:
       - "11111:11111"
     networks:
       - network
-    command: uvicorn main:app --host 0.0.0.0 --port 11111 --reload --reload-dir /app
+    # We use --app-dir /app so FastAPI finds your code, while the process works in /mnt/host
+    command: uvicorn main:app --host 0.0.0.0 --port 11111 --reload --reload-dir /app --app-dir /app
 
   frontend:
     build:
